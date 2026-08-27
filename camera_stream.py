@@ -1,61 +1,72 @@
-"""
-LEITOR DE CÂMERA EM TEMPO REAL (sem acúmulo de atraso)
-========================================================
+"""Captura de câmera em thread com descarte de frames antigos.
 
-Por que a versão anterior travava:
-Antes, o programa lia um frame da câmera -> rodava a IA nele (o passo mais
-lento) -> mostrava na tela -> lia o PRÓXIMO frame -> repetia. Só que a
-câmera do celular continua mandando frames novos o tempo todo, mesmo
-enquanto a IA ainda está processando o frame anterior. Esses frames vão
-se acumulando numa fila interna do OpenCV, e o programa insiste em
-processar TODOS eles, em ordem — o resultado é um atraso que só cresce
-(o vídeo "trava" e fica cada v5vez mais fora do tempo real).
-
-A solução (padrão "producer-consumer com descarte de frame"):
-Essa classe roda em uma THREAD separada, só de ler a câmera, o mais
-rápido possível, e guarda apenas o ÚLTIMO frame lido. O restante do
-programa (que roda a IA) sempre pega o frame mais atual disponível e
-IGNORA os frames antigos que não deu tempo de processar. Ou seja, a
-gente troca "processar 100% dos frames" por "estar sempre em tempo
-real" — que é o que importa numa câmera de segurança ao vivo.
+A IA nunca consome uma fila atrasada: ela sempre pega o pacote mais novo.
+Cada pacote recebe um número de sequência para impedir que o mesmo frame seja
+inferido duas vezes quando a câmera está entregando menos FPS que o loop.
 """
 
+from __future__ import annotations
+
+import os
 import threading
 import time
+from dataclasses import dataclass
+from typing import Optional, Union
 
 import cv2
 
 
+@dataclass
+class FramePacket:
+    seq: int
+    captured_at: float
+    frame: object
+
+
 class LeitorCamera:
-    def __init__(self, fonte, largura_alvo=None):
-        """
-        fonte: 0, 1, 2... (índice de webcam) ou uma URL (rtsp://, http://)
-        largura_alvo: se definido, reduz cada frame para essa largura
-                      (mantendo a proporção) assim que ele chega —
-                      MUITO importante para performance, já que celulares
-                      costumam mandar vídeo em resolução bem mais alta
-                      do que o necessário para a IA detectar os animais.
-        """
+    def __init__(
+        self,
+        fonte: Union[int, str],
+        largura_alvo: Optional[int] = 640,
+        altura_alvo: Optional[int] = 480,
+        fps_alvo: Optional[int] = 30,
+    ) -> None:
         self.fonte = fonte
         self.largura_alvo = largura_alvo
-        self.captura = cv2.VideoCapture(fonte)
+        self.altura_alvo = altura_alvo
+        self.fps_alvo = fps_alvo
+        self.captura = self._abrir_captura(fonte)
 
-        # tenta pedir pro driver da câmera manter só 1 frame de buffer
-        # (nem todo backend/câmera respeita isso, mas não custa tentar)
         self.captura.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if largura_alvo:
+            self.captura.set(cv2.CAP_PROP_FRAME_WIDTH, largura_alvo)
+        if altura_alvo:
+            self.captura.set(cv2.CAP_PROP_FRAME_HEIGHT, altura_alvo)
+        if fps_alvo:
+            self.captura.set(cv2.CAP_PROP_FPS, fps_alvo)
+
+        # Em webcams USB no Windows, MJPG costuma reduzir uso de banda/CPU.
+        if isinstance(fonte, int):
+            self.captura.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
 
         if not self.captura.isOpened():
-            raise RuntimeError(
-                f"Não consegui abrir a fonte de vídeo: {fonte!r}. "
-                "Confira se o número/URL da câmera está certo e se ela "
-                "está ligada/conectada na mesma rede."
-            )
+            raise RuntimeError(f"Não consegui abrir a fonte de vídeo: {fonte!r}.")
 
         self._lock = threading.Lock()
-        self._frame_atual = None
+        self._packet: Optional[FramePacket] = None
         self._rodando = False
-        self._thread = None
+        self._thread: Optional[threading.Thread] = None
         self.fps_captura = 0.0
+
+    @staticmethod
+    def _abrir_captura(fonte):
+        # DirectShow tende a ter menor latência para webcam física no Windows.
+        if os.name == "nt" and isinstance(fonte, int):
+            captura = cv2.VideoCapture(fonte, cv2.CAP_DSHOW)
+            if captura.isOpened():
+                return captura
+            captura.release()
+        return cv2.VideoCapture(fonte)
 
     def iniciar(self):
         self._rodando = True
@@ -63,40 +74,56 @@ class LeitorCamera:
         self._thread.start()
         return self
 
-    def _loop_captura(self):
+    def _loop_captura(self) -> None:
         contador = 0
-        marco_tempo = time.time()
+        marco_tempo = time.perf_counter()
+        seq = 0
 
         while self._rodando:
             ok, frame = self.captura.read()
             if not ok:
-                # câmera sem frame novo no momento (comum em streams de
-                # celular via wifi) — espera um pouquinho e tenta de novo
-                time.sleep(0.05)
+                time.sleep(0.02)
                 continue
 
+            # Caso o driver ignore a resolução pedida, reduzimos aqui.
             if self.largura_alvo and frame.shape[1] > self.largura_alvo:
                 escala = self.largura_alvo / frame.shape[1]
                 nova_altura = int(frame.shape[0] * escala)
-                frame = cv2.resize(frame, (self.largura_alvo, nova_altura))
+                frame = cv2.resize(
+                    frame,
+                    (self.largura_alvo, nova_altura),
+                    interpolation=cv2.INTER_AREA,
+                )
 
+            seq += 1
+            packet = FramePacket(seq=seq, captured_at=time.perf_counter(), frame=frame)
             with self._lock:
-                self._frame_atual = frame
+                self._packet = packet
 
-            # calcula o fps real de chegada de frames (só informativo)
             contador += 1
-            if time.time() - marco_tempo >= 1.0:
-                self.fps_captura = contador / (time.time() - marco_tempo)
+            agora = time.perf_counter()
+            janela = agora - marco_tempo
+            if janela >= 1.0:
+                self.fps_captura = contador / janela
                 contador = 0
-                marco_tempo = time.time()
+                marco_tempo = agora
+
+    def ultimo_pacote(self) -> Optional[FramePacket]:
+        with self._lock:
+            if self._packet is None:
+                return None
+            return FramePacket(
+                seq=self._packet.seq,
+                captured_at=self._packet.captured_at,
+                frame=self._packet.frame.copy(),
+            )
 
     def ultimo_frame(self):
-        """Devolve o frame mais recente disponível (ou None se ainda não chegou nenhum)."""
-        with self._lock:
-            return None if self._frame_atual is None else self._frame_atual.copy()
+        packet = self.ultimo_pacote()
+        return None if packet is None else packet.frame
 
-    def parar(self):
+    def parar(self) -> None:
         self._rodando = False
         if self._thread is not None:
-            self._thread.join(timeout=1)
+            self._thread.join(timeout=1.0)
         self.captura.release()

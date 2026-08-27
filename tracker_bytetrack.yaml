@@ -1,0 +1,10 @@
+# ByteTrack ajustado para uma câmera fixa de passagem/porteira.
+# A detecção usa conf baixa para o ByteTrack poder recuperar objetos momentaneamente
+# fracos; já um novo ID exige confiança maior, reduzindo IDs fantasmas.
+tracker_type: bytetrack
+track_high_thresh: 0.35
+track_low_thresh: 0.10
+new_track_thresh: 0.45
+track_buffer: 60
+match_thresh: 0.85
+fuse_score: true

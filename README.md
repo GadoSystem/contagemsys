@@ -1,227 +1,305 @@
-# Contador de Animais em Tempo Real — Guia Passo a Passo
+# Contagem de Rebanho em Tempo Real — versão 2
 
-Este projeto junta **Python + OpenCV + Ultralytics YOLO + ByteTrack/BoT-SORT + FastAPI**
-para contar animais ao vivo pela câmera. Abre uma janela mostrando **data/hora** e a
-**contagem em tempo real**, e também expõe esses dados numa API.
+Este projeto foi reestruturado para resolver os dois problemas mais importantes da versão anterior:
 
-> **Atualização:** esta versão corrige o travamento/lag que acontecia com a câmera
-> do celular. Veja a seção "Por que estava travando" mais abaixo para entender o quê
-> mudou.
+1. **contagem duplicada por troca de ID do tracker**;
+2. **vídeo lento/atrasado porque a IA não acompanha os FPS da câmera**.
 
-Arquivos do projeto:
-```
-cattle-counter/
-├── main.py            <- roda tudo (câmera + IA + janela + API)
-├── camera_stream.py    <- lê a câmera em tempo real, sem acumular atraso
-├── api.py                <- os endpoints da API (FastAPI)
-├── state.py                <- guarda o número da contagem de forma segura
-├── requirements.txt         <- lista de dependências
-└── README.md                  <- este guia
-```
+A regra agora é: **um ID não é uma contagem**. O total só aumenta quando a trajetória cruza uma linha virtual no sentido **DIREITA → ESQUERDA**. Um cruzamento **ESQUERDA → DIREITA** é interpretado como retorno de algo já contado e não soma.
 
----
+## Arquitetura
 
-## Passo 1 — Instalar o Python
-
-Você precisa do **Python 3.10, 3.11 ou 3.12** (o Ultralytics ainda não recomenda 3.13+).
-
-1. Baixe em: https://www.python.org/downloads/
-2. No instalador do Windows, **marque a caixa "Add Python to PATH"** antes de instalar.
-3. Confirme a instalação abrindo o terminal e rodando:
-
-```bash
-python --version
+```text
+webcam / RTSP
+     │
+     ├── thread de captura ──> mantém somente o frame mais novo
+     │
+     ├── thread da IA ───────> YOLO + tracker + trajetória + linha direcional
+     │                             │
+     │                             └── evento DIREITA -> ESQUERDA = +1
+     │
+     ├── janela OpenCV ──────> vídeo fluido + última detecção disponível
+     │
+     └── FastAPI ────────────> Swagger / contagem / eventos / reset
 ```
 
----
+## Arquivos
 
-## Passo 2 — Abrir a pasta do projeto no VS Code
-
-1. Extraia o arquivo `.zip` do projeto em uma pasta, por exemplo `Documentos/cattle-counter`.
-2. Abra o **VS Code** e vá em **File → Open Folder...**, selecione a pasta `cattle-counter`.
-3. Abra o terminal integrado: **Terminal → New Terminal** (ou `Ctrl + '`).
-
----
-
-## Passo 3 — Criar o ambiente virtual (venv)
-
-**Windows (PowerShell/CMD):**
-```bash
-python -m venv venv
-source venv/Scripts/activate
+```text
+contagemsys/
+├── main.py                    # câmera + IA + janela + API
+├── camera_stream.py           # captura sem fila/lag
+├── counting.py                # contador direcional e anti-duplicação
+├── state.py                   # estado thread-safe e controle de sessão
+├── api.py                     # endpoints FastAPI
+├── tracker_bytetrack.yaml     # perfil rápido (padrão)
+├── tracker_botsort_reid.yaml  # perfil mais robusto contra ID switch
+├── export_openvino.py         # aceleração opcional para CPU Intel
+├── requirements.txt
+└── tests/
+    └── test_directional_counter.py
 ```
 
-**Windows (Git Bash — é o que aparece se o terminal mostrar "MINGW64"):**
+## Instalação recomendada
+
+Use **Python 3.12**.
+
+### PowerShell / CMD
+
 ```bash
 python -m venv venv
-source venv/Scripts/activate
-```
-
-**Mac/Linux:**
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-Se funcionou, o nome `(venv)` aparece no início da linha do terminal.
-
----
-
-## Passo 4 — Instalar as dependências
-
-Com o `(venv)` ativado:
-
-```bash
+venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Teste se deu certo:
-```bash
-python -c "import cv2, ultralytics, fastapi; print('Tudo instalado com sucesso!')"
-```
-
----
-
-## Passo 5 — Testar SEM celular e SEM animal (validação rápida)
-
-1. Abra `main.py` no VS Code e troque temporariamente:
-   ```python
-   CLASSES_ALVO = [0]  # 0 = pessoa, só para testar o pipeline
-   ```
-2. Confirme que `FONTE_VIDEO = 0` (webcam do notebook).
-3. Rode:
-   ```bash
-   python main.py
-   ```
-4. Uma janela deve abrir com a webcam, a faixa preta com data/hora, a contagem
-   e agora também o **FPS** (frames por segundo que o programa está processando).
-5. Em outra aba do navegador (sem fechar a janela do vídeo!), acesse
-   **http://localhost:8000/docs** e teste o endpoint `GET /contagem/atual`.
-6. Para sair: clique na janela do vídeo e pressione **`q`**.
-
----
-
-## Passo 6 — Conectar a câmera do celular
-
-### Opção A (recomendada): app Iriun Webcam
-
-1. Instale **"Iriun Webcam"** no celular (Play Store / App Store) **e** o programa
-   Iriun no computador (https://iriun.com/).
-2. Abra os dois ao mesmo tempo, na **mesma rede Wi-Fi** — eles se conectam sozinhos,
-   sem precisar digitar nenhum IP.
-3. No `main.py`, troque:
-   ```python
-   FONTE_VIDEO = 1   # webcam do notebook costuma ser 0; celular geralmente entra como 1
-   ```
-   Se não abrir a câmera certa, teste `2`, `3`...
-
-### Opção B (Android, mais controle de resolução): app IP Webcam
-
-1. Instale **"IP Webcam"** (Android), abra, toque em **"Start server"**.
-2. Anote o endereço mostrado, ex: `http://192.168.0.15:8080`.
-3. No `main.py`, troque (**repare nas aspas, são obrigatórias**):
-   ```python
-   FONTE_VIDEO = "http://192.168.0.15:8080/video"
-   ```
-
----
-
-## Passo 7 — Testar a detecção do animal de verdade
-
-1. Volte `CLASSES_ALVO` para o animal desejado:
-   ```python
-   CLASSES_ALVO = [19]   # 19 = cow (gado)
-   # outras opções: 17 = horse (cavalo), 18 = sheep (ovelha)
-   ```
-2. Aponte a câmera do celular para uma foto/vídeo de vaca em outra tela (você
-   ainda não tem gado por perto — o YOLO não diferencia animal real de animal na tela).
-
-> **Galinha não existe na lista padrão do YOLO** (dataset COCO). Gado, cavalo e
-> ovelha funcionam de fábrica; para galinha é necessário fine-tuning com dataset
-> próprio (ex: buscar "chicken detection dataset" no Roboflow Universe).
-
----
-
-## Por que estava travando (e o que foi corrigido)
-
-O problema **não era a câmera do celular em si**, era como o programa consumia
-os frames dela. Três causas, já corrigidas nesta versão:
-
-1. **Fila de frames se acumulando.** O programa antigo processava os frames um a
-   um, na ordem exata em que chegavam. Como a IA é mais lenta que a taxa de
-   frames da câmera, a fila só crescia — o vídeo ficava cada vez mais atrasado.
-   **Correção:** criamos `camera_stream.py`, que lê a câmera numa thread própria
-   e sempre entrega o **frame mais recente**, descartando os que ficaram para
-   trás. Isso troca "processar tudo" por "estar sempre em tempo real".
-2. **Resolução alta demais.** Celulares mandam vídeo em resolução bem maior do
-   que o necessário para detectar um animal. **Correção:** os frames agora são
-   redimensionados para `LARGURA_PROCESSAMENTO = 640` antes de entrar na IA, e o
-   YOLO processa internamente em `IMGSZ = 480`.
-3. **BoT-SORT como tracker padrão.** Ele é mais preciso em cenas com muita
-   oclusão, mas bem mais pesado que o ByteTrack. **Correção:** o padrão agora é
-   `TRACKER = "bytetrack.yaml"`. Se depois, com o gado de verdade, você notar
-   muita troca de ID (animais se cruzando confundem o contador), aí sim vale
-   testar `"botsort.yaml"` — mas só se o hardware aguentar.
-
-### Ajustes finos se ainda estiver lento
-
-No topo do `main.py`:
-```python
-LARGURA_PROCESSAMENTO = 480   # ainda menor = mais rápido, imagem menos nítida
-IMGSZ = 320                   # idem
-PULAR_FRAMES = 1              # processa 1 a cada 2 frames (2x mais rápido)
-```
-O contador de **FPS** que aparece na tela ajuda a saber se as mudanças
-melhoraram: acima de ~10-15 FPS já fica bem fluido para contagem de animais
-(eles não se movem tão rápido quanto pessoas correndo, por exemplo).
-
----
-
-## Comandos de terminal usados neste projeto (resumo)
+### Git Bash
 
 ```bash
-# 1. criar e ativar o ambiente virtual
 python -m venv venv
-venv\Scripts\activate            # Windows (PowerShell/CMD)
-source venv/Scripts/activate     # Windows (Git Bash)
-source venv/bin/activate         # Mac/Linux
-
-# 2. instalar dependências
+source venv/Scripts/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
 
-# 3. rodar o projeto
+Teste:
+
+```bash
+python -c "import cv2, torch, ultralytics, fastapi; print('Dependencias OK')"
+```
+
+## Executar
+
+```bash
 python main.py
-
-# 4. (opcional) desativar o ambiente virtual quando terminar
-deactivate
 ```
 
----
+Acesse:
 
-## Problemas comuns (troubleshooting)
+- Swagger: `http://localhost:8000/docs`
+- contagem atual: `GET /contagem/atual`
+- últimos cruzamentos: `GET /contagem/eventos`
+- iniciar nova sessão: `POST /contagem/resetar`
+- saúde da aplicação: `GET /health`
 
-| Problema | Causa provável | Solução |
-|---|---|---|
-| Vídeo travando/atrasado | Fila de frames acumulando, resolução alta, tracker pesado | Já corrigido nesta versão; se persistir, baixe `LARGURA_PROCESSAMENTO`, `IMGSZ` e use `PULAR_FRAMES = 1` ou `2` |
-| `command not found: venvScriptsactivate` | Terminal é Git Bash, não PowerShell | Use `source venv/Scripts/activate` |
-| `SyntaxError` na linha do `FONTE_VIDEO` | Esqueceu as aspas na URL | URLs de texto precisam de aspas: `FONTE_VIDEO = "http://..."` |
-| Conexão recusada em `localhost:8000` | O `main.py` não está mais rodando (janela foi fechada ou 'q' foi pressionado) | Deixe a janela do vídeo aberta e acesse a API em outra aba, sem fechar o terminal |
-| `Error: source not found` (Iriun/IP Webcam) | Celular e PC em redes Wi-Fi diferentes, ou app fechado | Confirme mesma rede Wi-Fi e os dois apps abertos |
-| Detecta poucos animais / erra muito | Modelo genérico, ângulo difícil, pouca luz | Baixe `CONFIANCA_MINIMA` (ex: `0.25`) ou faça fine-tuning depois |
-| Contagem "Total único" sobe rápido demais | Tracker perdendo o ID (ID switch) | Teste `TRACKER = "botsort.yaml"` (mais robusto, porém mais lento) |
-| Porta 8000 já em uso | Outro programa usando a porta | Troque `port=8000` para `port=8001` dentro de `iniciar_api()` no `main.py` |
+Na janela da câmera, pressione **Q** para encerrar.
 
 ---
 
-## Próximos passos (depois que isso estiver funcionando)
+# Como testar agora com pessoas
 
-1. Trocar o modelo genérico por um **fine-tuned** com fotos reais da sua fazenda.
-2. Trocar a fonte de vídeo do celular pela **câmera de segurança real** (RTSP) —
-   o código não muda, só o valor de `FONTE_VIDEO`.
-3. Adicionar uma **linha/zona de contagem** (contar só quem cruza o portão de
-   entrada/saída), em vez de contar todo animal visível no quadro.
-4. Guardar o histórico da contagem em um banco de dados (SQLite para começar)
-   em vez de só manter em memória.
-5. Se tiver uma placa de vídeo (GPU) disponível, o Ultralytics usa ela
-   automaticamente quando encontra CUDA instalado — nesse caso dá pra usar
-   `botsort.yaml` e resoluções maiores sem perder fluidez.
+No topo de `main.py` deixe:
+
+```python
+FONTE_VIDEO = 0
+MODELO = "yolo26n.pt"
+CLASSES_ALVO = [0]  # person
+```
+
+A linha amarela fica no centro da imagem. Para somar 1:
+
+```text
+ESQUERDA       LINHA                    DIREITA
+                                  pessoa começa aqui
+                     <------------------
+                        atravessa a linha
++1 somente nesse sentido
+```
+
+Se você andar **esquerda → direita**, o sistema registra um **retorno**, mas não soma. Se o mesmo ID voltar novamente da direita para a esquerda, ele continua bloqueado e não soma outra vez.
+
+## Por que virar o corpo não deve mais aumentar o total
+
+Na versão antiga havia algo parecido com:
+
+```python
+ids_unicos.add(track_id)
+total = len(ids_unicos)
+```
+
+Se o tracker perdesse `ID 7` e recriasse você como `ID 12`, o total aumentava imediatamente.
+
+Agora isso não existe. Um novo ID parado, girando ou andando do mesmo lado da linha não muda a contagem. Para gerar `+1`, a trajetória precisa:
+
+1. existir por alguns frames;
+2. ter deslocamento horizontal mínimo;
+3. sair claramente do lado direito;
+4. atravessar uma **zona morta** ao redor da linha;
+5. chegar claramente ao lado esquerdo.
+
+Essa histerese reduz contagem por tremedeira de bounding box.
+
+---
+
+# Trackers
+
+## Padrão: ByteTrack ajustado
+
+```python
+TRACKER = str(BASE_DIR / "tracker_bytetrack.yaml")
+```
+
+É a primeira opção para CPU e para uma câmera fixa apontando para uma passagem. O arquivo foi ajustado para:
+
+- manter tracks perdidos por mais tempo (`track_buffer`);
+- permitir associação mais tolerante (`match_thresh`);
+- aceitar detecções fracas para recuperar uma trajetória;
+- exigir confiança maior para abrir um **novo** ID.
+
+## Se continuar trocando muito o ID: BoT-SORT + ReID
+
+Troque em `main.py`:
+
+```python
+TRACKER = str(BASE_DIR / "tracker_botsort_reid.yaml")
+```
+
+Esse perfil usa informação de aparência (ReID), por isso consegue recuperar melhor uma identidade depois de certas oclusões/mudanças. Em compensação, consome mais processamento.
+
+Para começar, use ByteTrack. Só passe para ReID se a troca de ID estiver realmente causando falhas perto da linha.
+
+---
+
+# FPS e latência
+
+O painel mostra três métricas diferentes:
+
+- **FPS câmera**: quantos frames a webcam entrega;
+- **FPS IA**: quantos frames por segundo o YOLO + tracker consegue analisar;
+- **latência IA**: idade aproximada do frame quando a inferência terminou.
+
+A janela não precisa ficar limitada ao FPS da IA. A captura continua lendo o frame mais novo e a inferência descarta frames intermediários se estiver atrasada.
+
+## Ajustes para CPU fraca
+
+Primeiro tente:
+
+```python
+IMGSZ = 320
+LARGURA_CAMERA = 640
+ALTURA_CAMERA = 480
+```
+
+Se o animal ocupar uma parte grande da imagem, `320` costuma ser suficiente para validar o sistema. Para animais muito distantes, aumente novamente para `416`, `512` ou treine um modelo especializado.
+
+Evite usar 1080p para a inferência se a câmera estiver em uma porteira onde o animal aparece grande no quadro.
+
+## GPU NVIDIA
+
+Se PyTorch detectar CUDA, o projeto seleciona automaticamente a GPU e ativa FP16.
+
+Confira no terminal ao iniciar:
+
+```text
+GPU detectada: ... -> CUDA + FP16 habilitado
+```
+
+## OpenVINO para CPU Intel (opcional)
+
+Instale:
+
+```bash
+pip install openvino
+python export_openvino.py
+```
+
+Depois use a pasta exportada como modelo em `main.py`, normalmente:
+
+```python
+MODELO = "yolo26n_openvino_model"
+```
+
+Compare `FPS IA` antes e depois no mesmo computador/câmera.
+
+---
+
+# Passar de humanos para bovinos
+
+Para um teste inicial usando o modelo COCO:
+
+```python
+CLASSES_ALVO = [19]  # cow
+```
+
+Isso serve para validar a infraestrutura, mas **não deve ser considerado o modelo final de produção**.
+
+Para uma contagem confiável de bovinos, o passo correto é treinar/fazer fine-tuning com imagens reais ou muito parecidas com:
+
+- a câmera que ficará instalada;
+- a altura e o ângulo reais;
+- dia/noite e diferentes iluminações;
+- raças e cores presentes no rebanho;
+- animais parcialmente escondidos;
+- dois ou mais bovinos lado a lado;
+- poeira, sombra, barro e grades/cercas do local.
+
+Depois basta trocar:
+
+```python
+MODELO = "best.pt"
+CLASSES_ALVO = [0]  # se seu dataset próprio tiver apenas a classe bovino
+```
+
+O contador e a API continuam iguais.
+
+---
+
+# Posicionamento da câmera — muito importante
+
+Para uma aplicação real de porteira/corredor:
+
+1. **câmera fixa**; não deixe a câmera balançando;
+2. faça os animais passarem por um corredor relativamente estreito;
+3. coloque a linha virtual perpendicular ao fluxo;
+4. deixe espaço visível antes e depois da linha, para o tracker construir trajetória;
+5. evite a linha exatamente numa região onde animais ficam parados ou se agrupam;
+6. se possível, use um ângulo em que um bovino não esconda totalmente o outro.
+
+Um bom posicionamento da câmera normalmente melhora mais a contagem do que simplesmente usar um modelo YOLO maior.
+
+---
+
+# Parâmetros da linha
+
+Em `main.py`:
+
+```python
+LINHA_X_RELATIVA = 0.50
+MARGEM_LINHA_RELATIVA = 0.025
+DESLOCAMENTO_MIN_RELATIVO = 0.07
+MIN_FRAMES_TRACK = 3
+```
+
+- `LINHA_X_RELATIVA`: posição da linha (`0.50` = meio da tela).
+- `MARGEM_LINHA_RELATIVA`: zona morta anti-tremedeira.
+- `DESLOCAMENTO_MIN_RELATIVO`: distância mínima para considerar movimento real.
+- `MIN_FRAMES_TRACK`: evita aceitar um ID que apareceu por apenas 1–2 inferências.
+
+Se estiver perdendo cruzamentos muito rápidos, diminua `MIN_FRAMES_TRACK` para `2`. Se houver muito ruído perto da linha, aumente a margem.
+
+---
+
+# Testes automáticos
+
+Execute:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Os testes cobrem:
+
+- direita → esquerda soma uma vez;
+- esquerda → direita não soma;
+- tremedeira perto da linha não soma;
+- o mesmo ID não é recontado;
+- retorno primeiro bloqueia uma futura recontagem;
+- um ID que aparece já no lado esquerdo não é contado automaticamente.
+
+---
+
+# Limitação que ainda existe
+
+Nenhum tracker é perfeito. Se um bovino desaparecer completamente, receber outro ID e depois fizer um caminho complexo, pode haver casos extremos de identidade duplicada. A linha direcional elimina grande parte desse problema porque um ID novo **não é contado automaticamente**, mas a versão de produção ainda deve ser validada com vídeos reais do local.
+
+Se a troca de ID acontecer justamente durante uma oclusão na linha, use o perfil ReID e, principalmente, treine o detector com dados da câmera real.

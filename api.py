@@ -1,35 +1,48 @@
-"""
-API FastAPI que expõe o resultado da contagem para fora do script
-(dashboard, app, Postman, navegador, etc).
-
-Roda em uma thread separada, disparada pelo main.py.
-Teste no navegador: http://localhost:8000/docs
-"""
+"""API HTTP para consultar e controlar a sessão de contagem."""
 
 from fastapi import FastAPI
 
 from state import estado
 
 app = FastAPI(
-    title="API de Contagem de Animais",
-    description="Contagem em tempo real via câmera + YOLO + tracking.",
-    version="1.0.0",
+    title="API de Contagem de Rebanho",
+    description=(
+        "Contagem direcional em tempo real por câmera + YOLO + tracking. "
+        "O total aumenta somente em cruzamentos da direita para a esquerda."
+    ),
+    version="2.0.0",
 )
 
 
 @app.get("/")
 def raiz():
-    return {"mensagem": "API de contagem no ar. Acesse /docs para testar os endpoints."}
+    return {
+        "mensagem": "API de contagem no ar.",
+        "docs": "/docs",
+        "contagem": "/contagem/atual",
+    }
+
+
+@app.get("/health")
+def health():
+    snapshot = estado.snapshot()
+    return {
+        "ok": bool(snapshot["sistema_rodando"]),
+        "ultima_atualizacao": snapshot["ultima_atualizacao"],
+    }
 
 
 @app.get("/contagem/atual")
 def contagem_atual():
-    """Retorna o snapshot mais recente da contagem."""
     return estado.snapshot()
+
+
+@app.get("/contagem/eventos")
+def eventos_contagem():
+    return {"eventos": estado.eventos()}
 
 
 @app.post("/contagem/resetar")
 def resetar_contagem():
-    """Zera os contadores (útil para começar uma nova sessão de contagem)."""
     estado.resetar()
-    return {"mensagem": "Contagem resetada.", "novo_estado": estado.snapshot()}
+    return {"mensagem": "Nova sessão de contagem iniciada.", "novo_estado": estado.snapshot()}
