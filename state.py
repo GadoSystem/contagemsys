@@ -1,105 +1,54 @@
-"""Estado compartilhado entre a visão computacional e a API FastAPI."""
-
 from __future__ import annotations
 
-import threading
 from collections import deque
-from datetime import datetime
-from typing import Deque, Dict, List, Optional
+from threading import RLock
+from typing import Any
 
 
-class ContagemState:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._total = 0
-        self._no_frame = 0
-        self._maior_contagem = 0
-        self._retornos = 0
-        self._fps_ia = 0.0
-        self._fps_camera = 0.0
-        self._latencia_ms = 0.0
-        self._ultima_atualizacao: Optional[str] = None
-        self._rodando = False
-        self._reset_version = 0
-        self._eventos: Deque[Dict] = deque(maxlen=100)
+class SharedState:
+    def __init__(self, max_events: int = 200) -> None:
+        self._lock = RLock()
+        self._max_events = max_events
+        self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
+        self._data: dict[str, Any] = {
+            "total_contado": 0,
+            "animais_no_frame_agora": 0,
+            "retornos_esquerda_para_direita": 0,
+            "direcao_contada": "direita_para_esquerda",
+            "fps_ia": 0.0,
+            "fps_camera": 0.0,
+            "latencia_ia_ms": 0.0,
+            "sistema_rodando": False,
+            "session_id": None,
+            "tracker": None,
+            "modelo": None,
+        }
 
-    def atualizar(
-        self,
-        *,
-        total: int,
-        no_frame: int,
-        retornos: int,
-        fps_ia: float,
-        fps_camera: float,
-        latencia_ms: float,
-        reset_version: int,
-    ) -> bool:
-        """Atualiza o estado somente se pertencer à sessão atual.
-
-        Isso evita que um frame que estava sendo inferido antes de um POST /resetar
-        sobrescreva o zero da nova sessão ao terminar o processamento.
-        """
+    def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            if reset_version != self._reset_version:
-                return False
-            self._total = int(total)
-            self._no_frame = int(no_frame)
-            self._retornos = int(retornos)
-            self._fps_ia = float(fps_ia)
-            self._fps_camera = float(fps_camera)
-            self._latencia_ms = float(latencia_ms)
-            self._maior_contagem = max(self._maior_contagem, self._total)
-            self._ultima_atualizacao = datetime.now().isoformat()
-            self._rodando = True
-            return True
+            return dict(self._data)
 
-    def registrar_evento(self, evento: Dict, reset_version: int) -> None:
+    def update_metrics(self, **kwargs: Any) -> None:
         with self._lock:
-            if reset_version != self._reset_version:
-                return
-            item = dict(evento)
-            item["timestamp"] = datetime.now().isoformat()
-            self._eventos.appendleft(item)
+            self._data.update(kwargs)
 
-    def snapshot(self) -> dict:
+    def register_event(self, event: dict[str, Any]) -> None:
         with self._lock:
-            return {
-                # Mantido por compatibilidade com o endpoint antigo.
-                "total_unico": self._total,
-                "total_contado": self._total,
-                "animais_no_frame_agora": self._no_frame,
-                "maior_contagem_ja_vista": self._maior_contagem,
-                "retornos_esquerda_para_direita": self._retornos,
-                "direcao_contada": "direita_para_esquerda",
-                "fps_ia": round(self._fps_ia, 2),
-                "fps_camera": round(self._fps_camera, 2),
-                "latencia_ia_ms": round(self._latencia_ms, 1),
-                "ultima_atualizacao": self._ultima_atualizacao,
-                "sistema_rodando": self._rodando,
-            }
+            self._events.appendleft(dict(event))
+            if event.get("contabilizado"):
+                self._data["total_contado"] += 1
+            elif event.get("direcao") == "esquerda_para_direita":
+                self._data["retornos_esquerda_para_direita"] += 1
 
-    def eventos(self) -> List[Dict]:
+    def events(self, limit: int | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            return list(self._eventos)
+            values = list(self._events)
+        return values[:limit] if limit else values
 
-    def resetar(self) -> int:
+    def reset_counters(self, session_id: int | None = None) -> None:
         with self._lock:
-            self._reset_version += 1
-            self._total = 0
-            self._no_frame = 0
-            self._maior_contagem = 0
-            self._retornos = 0
-            self._eventos.clear()
-            self._ultima_atualizacao = datetime.now().isoformat()
-            return self._reset_version
-
-    def reset_version(self) -> int:
-        with self._lock:
-            return self._reset_version
-
-    def marcar_parado(self) -> None:
-        with self._lock:
-            self._rodando = False
-
-
-estado = ContagemState()
+            self._data["total_contado"] = 0
+            self._data["animais_no_frame_agora"] = 0
+            self._data["retornos_esquerda_para_direita"] = 0
+            self._data["session_id"] = session_id
+            self._events.clear()

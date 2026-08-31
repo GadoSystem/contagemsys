@@ -1,5 +1,6 @@
-# Versão atual do Ultralytics usada como base para os trackers/configurações abaixo.
-ultralytics>=8.4.129,<8.5.0
-opencv-python>=4.10
-fastapi>=0.115
-uvicorn[standard]>=0.30
+ultralytics>=8.4.136,<9
+opencv-python>=4.10.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+PyYAML>=6.0.2
+numpy>=1.26.0

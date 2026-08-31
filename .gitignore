@@ -1,0 +1,16 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.sqlite
+*.sqlite3
+eventos/*
+!eventos/.gitkeep
+data/*
+!data/.gitkeep
+benchmark_results.csv
+*.onnx
+*_openvino_model/
+*.engine

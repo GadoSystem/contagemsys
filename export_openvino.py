@@ -1,19 +1,11 @@
-"""Exporta o detector para OpenVINO (opcional, indicado principalmente para CPU Intel).
-
-Uso:
-    pip install openvino
-    python export_openvino.py
-
-Depois troque MODELO em main.py para a pasta criada, normalmente:
-    MODELO = "yolo26n_openvino_model"
-"""
-
 from ultralytics import YOLO
 
-MODELO_ORIGEM = "yolo26n.pt"
-IMGSZ = 416
+from config import load_config
+
 
 if __name__ == "__main__":
-    model = YOLO(MODELO_ORIGEM)
-    caminho = model.export(format="openvino", imgsz=IMGSZ, dynamic=False)
-    print(f"Modelo OpenVINO exportado em: {caminho}")
+    cfg = load_config()
+    model_path = cfg["model"]["path"]
+    model = YOLO(model_path)
+    exported = model.export(format="openvino", imgsz=cfg["model"]["imgsz"], half=False)
+    print(f"Modelo OpenVINO exportado para: {exported}")

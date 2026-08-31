@@ -1,0 +1,58 @@
+app:
+  name: "Sistema de Contagem em Tempo Real - V3"
+  host: "127.0.0.1"
+  port: 8000
+  show_window: true
+
+display:
+  sidebar:
+    enabled: true
+    # Largura, em pixels, da faixa preta de informacoes.
+    width: 300
+    # Pode ser "left" ou "right".
+    position: "left"
+
+video:
+  source: 0
+  width: 1280
+  height: 720
+  inference_stride: 1
+
+model:
+  path: "yolo26n.pt"
+  classes: [0]
+  confidence: 0.35
+  imgsz: 416
+  device: null
+  tracker: "tracker_bytetrack.yaml"
+
+roi:
+  enabled: false
+  # Coordenadas normalizadas: 0.0 a 1.0
+  x1: 0.0
+  y1: 0.0
+  x2: 1.0
+  y2: 1.0
+
+gate:
+  # Duas fronteiras verticais criam LEFT | CENTER | RIGHT.
+  # Para contar: RIGHT -> CENTER -> LEFT.
+  left_x: 0.42
+  right_x: 0.58
+  stable_frames: 2
+  stale_after_frames: 120
+  count_direction: "right_to_left"
+  anchor: "bottom_center"
+
+persistence:
+  database: "data/contagem.db"
+  max_api_events: 200
+
+evidence:
+  enabled: true
+  directory: "eventos"
+  save_snapshot: true
+  save_clip: true
+  pre_seconds: 3.0
+  post_seconds: 3.0
+  clip_fps: 20.0

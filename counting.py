@@ -1,206 +1,153 @@
-"""Lógica de contagem direcional independente do detector/tracker.
-
-A regra principal é simples: IDs do tracker NÃO são a contagem.
-Um objeto só entra no total quando sua trajetória cruza a linha no sentido
-DIREITA -> ESQUERDA. Cruzamentos no sentido inverso são tratados como retorno
-e bloqueiam uma futura recontagem do mesmo ID.
-"""
-
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Deque, Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass
+from threading import RLock
+from typing import Literal
 
-
-LEFT = -1
-NEUTRAL = 0
-RIGHT = 1
+Zone = Literal["LEFT", "CENTER", "RIGHT"]
 
 
 @dataclass
 class TrackState:
-    track_id: int
-    first_seen_frame: int
-    last_seen_frame: int
-    frames_seen: int = 0
-    stable_side: int = NEUTRAL
+    candidate_zone: Zone | None = None
+    candidate_hits: int = 0
+    stable_zone: Zone | None = None
+    origin_side: Zone | None = None
+    touched_center: bool = False
     counted: bool = False
-    blocked_as_return: bool = False
-    leftmost_x: float = float("inf")
-    rightmost_x: float = float("-inf")
-    trail: Deque[Tuple[int, int]] = field(default_factory=lambda: deque(maxlen=30))
+    last_seen_frame: int = 0
 
 
-@dataclass
-class CrossingEvent:
-    track_id: int
-    direction: str
-    counted: bool
-    frame_index: int
-    point: Tuple[int, int]
+class GateCounter:
+    """Contador direcional com duas fronteiras e maquina de estados por track.
 
+    A passagem valida no sentido principal exige a sequencia estavel:
+        RIGHT -> CENTER -> LEFT
 
-class DirectionalLineCounter:
-    """Conta cruzamentos robustos em uma linha vertical.
-
-    Histerese: existe uma faixa morta ao redor da linha. O objeto precisa estar
-    claramente de um lado e depois claramente do outro lado para gerar evento.
-    Isso evita contagem por tremedeira da caixa, giro do corpo e ruído do detector.
+    Isso reduz contagens por jitter da bounding box, viradas no lugar e pequenas
+    oscilacoes proximas da antiga linha unica.
     """
 
     def __init__(
         self,
-        line_x: int,
-        frame_width: int,
-        dead_zone_px: int = 18,
-        min_track_frames: int = 3,
-        min_displacement_px: int = 36,
-        max_track_age_frames: int = 120,
+        left_x: float = 0.42,
+        right_x: float = 0.58,
+        stable_frames: int = 2,
+        stale_after_frames: int = 120,
     ) -> None:
-        self.line_x = int(line_x)
-        self.frame_width = int(frame_width)
-        self.dead_zone_px = max(2, int(dead_zone_px))
-        self.min_track_frames = max(2, int(min_track_frames))
-        self.min_displacement_px = max(self.dead_zone_px * 2, int(min_displacement_px))
-        self.max_track_age_frames = max(30, int(max_track_age_frames))
-
-        self.total_counted = 0
-        self.reverse_crossings = 0
-        self._tracks: Dict[int, TrackState] = {}
-        self._counted_ids: set[int] = set()
-        self._blocked_ids: set[int] = set()
+        if not 0 <= left_x < right_x <= 1:
+            raise ValueError("Esperado 0 <= left_x < right_x <= 1")
+        self.left_x = left_x
+        self.right_x = right_x
+        self.stable_frames = max(1, int(stable_frames))
+        self.stale_after_frames = max(1, int(stale_after_frames))
+        self.tracks: dict[int, TrackState] = {}
+        self._lock = RLock()
 
     def reset(self) -> None:
-        self.total_counted = 0
-        self.reverse_crossings = 0
-        self._tracks.clear()
-        self._counted_ids.clear()
-        self._blocked_ids.clear()
+        with self._lock:
+            self.tracks.clear()
 
-    def _side(self, x: float) -> int:
-        if x < self.line_x - self.dead_zone_px:
-            return LEFT
-        if x > self.line_x + self.dead_zone_px:
-            return RIGHT
-        return NEUTRAL
+    def zone_for_x(self, x: float, frame_width: int) -> Zone:
+        if frame_width <= 0:
+            raise ValueError("frame_width deve ser > 0")
+        xn = x / frame_width
+        if xn <= self.left_x:
+            return "LEFT"
+        if xn >= self.right_x:
+            return "RIGHT"
+        return "CENTER"
+
+    @staticmethod
+    def bottom_center(bbox: tuple[float, float, float, float] | list[float]) -> tuple[float, float]:
+        x1, y1, x2, y2 = bbox
+        return ((x1 + x2) / 2.0, y2)
 
     def update(
         self,
         track_id: int,
-        point: Tuple[int, int],
+        bbox: tuple[float, float, float, float] | list[float],
+        frame_width: int,
+        confidence: float,
         frame_index: int,
-    ) -> Optional[CrossingEvent]:
-        x, y = point
-        state = self._tracks.get(track_id)
-        if state is None:
-            state = TrackState(
-                track_id=track_id,
-                first_seen_frame=frame_index,
-                last_seen_frame=frame_index,
-                counted=track_id in self._counted_ids,
-                blocked_as_return=track_id in self._blocked_ids,
-            )
-            self._tracks[track_id] = state
+    ) -> dict | None:
+        anchor_x, anchor_y = self.bottom_center(bbox)
+        observed_zone = self.zone_for_x(anchor_x, frame_width)
+        with self._lock:
+            state = self.tracks.setdefault(track_id, TrackState())
+            state.last_seen_frame = frame_index
 
-        state.frames_seen += 1
-        state.last_seen_frame = frame_index
-        state.leftmost_x = min(state.leftmost_x, x)
-        state.rightmost_x = max(state.rightmost_x, x)
-        state.trail.append((int(x), int(y)))
+            if state.candidate_zone == observed_zone:
+                state.candidate_hits += 1
+            else:
+                state.candidate_zone = observed_zone
+                state.candidate_hits = 1
 
-        side = self._side(x)
-        if side == NEUTRAL:
-            return None
+            if state.candidate_hits < self.stable_frames:
+                return None
+            if state.stable_zone == observed_zone:
+                return None
 
-        if state.stable_side == NEUTRAL:
-            state.stable_side = side
-            return None
+            previous = state.stable_zone
+            state.stable_zone = observed_zone
 
-        if side == state.stable_side:
-            return None
+            if previous is None:
+                if observed_zone in ("LEFT", "RIGHT"):
+                    state.origin_side = observed_zone
+                return None
 
-        previous_side = state.stable_side
-        state.stable_side = side
+            # Entrou na zona central partindo de um lado conhecido.
+            if observed_zone == "CENTER" and previous in ("LEFT", "RIGHT"):
+                state.origin_side = previous
+                state.touched_center = True
+                return None
 
-        displacement = state.rightmost_x - state.leftmost_x
-        valid_trajectory = (
-            state.frames_seen >= self.min_track_frames
-            and displacement >= self.min_displacement_px
-        )
-        if not valid_trajectory:
-            return None
+            # Voltou ao mesmo lado sem completar a travessia.
+            if observed_zone in ("LEFT", "RIGHT") and observed_zone == state.origin_side:
+                state.touched_center = False
+                return None
 
-        # Sentido principal: DIREITA -> ESQUERDA.
-        if previous_side == RIGHT and side == LEFT:
-            if state.counted or state.blocked_as_return:
-                return CrossingEvent(
-                    track_id=track_id,
-                    direction="direita_para_esquerda",
-                    counted=False,
-                    frame_index=frame_index,
-                    point=(int(x), int(y)),
-                )
+            if not state.touched_center or state.origin_side not in ("LEFT", "RIGHT"):
+                # Track pode ter nascido no centro. So arma quando estabilizar em um lado.
+                if observed_zone in ("LEFT", "RIGHT"):
+                    state.origin_side = observed_zone
+                return None
 
-            state.counted = True
-            self._counted_ids.add(track_id)
-            self.total_counted += 1
-            return CrossingEvent(
-                track_id=track_id,
-                direction="direita_para_esquerda",
-                counted=True,
-                frame_index=frame_index,
-                point=(int(x), int(y)),
-            )
+            event = None
 
-        # Sentido inverso: interpretado como retorno de algo que já passou.
-        if previous_side == LEFT and side == RIGHT:
-            if not state.blocked_as_return:
-                self.reverse_crossings += 1
-            state.blocked_as_return = True
-            self._blocked_ids.add(track_id)
-            return CrossingEvent(
-                track_id=track_id,
-                direction="esquerda_para_direita",
-                counted=False,
-                frame_index=frame_index,
-                point=(int(x), int(y)),
-            )
+            if state.origin_side == "RIGHT" and observed_zone == "LEFT":
+                if not state.counted:
+                    state.counted = True
+                    event = {
+                        "track_id": track_id,
+                        "direcao": "direita_para_esquerda",
+                        "contabilizado": True,
+                        "confidence": round(float(confidence), 4),
+                        "anchor_x": round(anchor_x, 2),
+                        "anchor_y": round(anchor_y, 2),
+                        "frame_index": frame_index,
+                    }
+            elif state.origin_side == "LEFT" and observed_zone == "RIGHT":
+                event = {
+                    "track_id": track_id,
+                    "direcao": "esquerda_para_direita",
+                    "contabilizado": False,
+                    "confidence": round(float(confidence), 4),
+                    "anchor_x": round(anchor_x, 2),
+                    "anchor_y": round(anchor_y, 2),
+                    "frame_index": frame_index,
+                }
 
-        return None
+            # Depois da travessia, o lado de chegada vira a nova origem.
+            state.origin_side = observed_zone
+            state.touched_center = False
+            return event
 
-    def cleanup(self, current_frame: int) -> None:
-        expired = [
-            track_id
-            for track_id, state in self._tracks.items()
-            if current_frame - state.last_seen_frame > self.max_track_age_frames
-        ]
-        for track_id in expired:
-            del self._tracks[track_id]
-
-    def update_many(
-        self,
-        tracks: Iterable[Tuple[int, Tuple[int, int]]],
-        frame_index: int,
-    ) -> List[CrossingEvent]:
-        events: List[CrossingEvent] = []
-        for track_id, point in tracks:
-            event = self.update(track_id, point, frame_index)
-            if event is not None:
-                events.append(event)
-        self.cleanup(frame_index)
-        return events
-
-    def trail_for(self, track_id: int) -> List[Tuple[int, int]]:
-        state = self._tracks.get(track_id)
-        return [] if state is None else list(state.trail)
-
-    def status_for(self, track_id: int) -> str:
-        state = self._tracks.get(track_id)
-        if state is None:
-            return "tracking"
-        if state.counted:
-            return "contado"
-        if state.blocked_as_return:
-            return "retorno"
-        return "tracking"
+    def cleanup(self, frame_index: int) -> None:
+        with self._lock:
+            stale = [
+                track_id for track_id, state in self.tracks.items()
+                if frame_index - state.last_seen_frame > self.stale_after_frames
+            ]
+            for track_id in stale:
+                self.tracks.pop(track_id, None)
