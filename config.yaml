@@ -1,42 +1,98 @@
 app:
-  name: "Sistema de Contagem em Tempo Real - V3"
-  host: "127.0.0.1"
+  name: "Sistema de Contagem em Tempo Real - V4.1 Performance"
+  # 0.0.0.0 permite que outra maquina da mesma rede acesse a API.
+  host: "0.0.0.0"
   port: 8000
   show_window: true
 
+api:
+  auth:
+    enabled: true
+    # O valor real NAO fica neste arquivo. Ele vem da variavel de ambiente abaixo.
+    api_key_env: "CONTAGEM_API_KEY"
+  # Menor qualidade reduz CPU/rede sem prejudicar o acompanhamento no Rebano.
+  jpeg_quality: 72
+  # O video da API nao precisa acompanhar os 30 FPS da webcam.
+  stream_fps: 10
+  # false envia somente o video anotado para o Rebano; economiza CPU e rede.
+  include_sidebar: false
+
+# A tela local roda separada da IA. Assim o video continua fluido mesmo quando
+# a inferencia estiver em 4-8 FPS.
 display:
+  preview_fps: 20
+  # Se a IA demorar demais, nao deixa uma box antiga parada na tela indefinidamente.
+  max_box_age_ms: 700
   sidebar:
     enabled: true
-    # Largura, em pixels, da faixa preta de informacoes.
-    width: 300
-    # Pode ser "left" ou "right".
+    width: 280
     position: "left"
 
+# IMPORTANTE PARA DUAS WEBCAMS EM CPU:
+# 1 = uma inferencia YOLO por vez. As cameras se alternam e nao brigam por todos
+# os nucleos do processador. Se no futuro usar uma GPU forte, teste 2.
+performance:
+  max_concurrent_inferences: 1
+  # 0 = automatico (metade dos nucleos, no maximo 4).
+  torch_threads: 0
+  opencv_threads: 1
+
 video:
-  source: 0
-  width: 1280
-  height: 720
+  # 640x480 + MJPG reduz muito o uso do barramento USB com duas webcams.
+  width: 640
+  height: 480
+  fps: 30
+  backend: "auto"
+  fourcc: "MJPG"
+
+  # FPS alvo da IA por camera. O video local continua em ~20 FPS independente disso.
+  inference_fps: 6
   inference_stride: 1
+
+  cameras:
+    - id: "camera_1"
+      name: "Webcam 1"
+      source: 0
+      enabled: true
+
+    - id: "camera_2"
+      name: "Webcam 2"
+      source: 1
+      enabled: true
+
+      # Cada camera pode sobrescrever as configuracoes globais, por exemplo:
+      # inference_fps: 5
+      # width: 640
+      # height: 480
+      # roi:
+      #   enabled: true
+      #   x1: 0.10
+      #   y1: 0.15
+      #   x2: 0.90
+      #   y2: 0.95
+      # gate:
+      #   left_x: 0.40
+      #   right_x: 0.60
 
 model:
   path: "yolo26n.pt"
+  # 0 = person para testes. Para COCO, 19 = cow.
   classes: [0]
   confidence: 0.35
-  imgsz: 416
+  # 320 e o perfil recomendado para duas webcams em CPU.
+  # Se tiver GPU ou precisar detectar objetos pequenos, tente 416.
+  imgsz: 320
   device: null
   tracker: "tracker_bytetrack.yaml"
 
 roi:
   enabled: false
-  # Coordenadas normalizadas: 0.0 a 1.0
   x1: 0.0
   y1: 0.0
   x2: 1.0
   y2: 1.0
 
 gate:
-  # Duas fronteiras verticais criam LEFT | CENTER | RIGHT.
-  # Para contar: RIGHT -> CENTER -> LEFT.
   left_x: 0.42
   right_x: 0.58
   stable_frames: 2
@@ -53,6 +109,7 @@ evidence:
   directory: "eventos"
   save_snapshot: true
   save_clip: true
-  pre_seconds: 3.0
-  post_seconds: 3.0
-  clip_fps: 20.0
+  pre_seconds: 2.0
+  post_seconds: 2.0
+  # 12 FPS reduz copias de frame e escrita em disco sem perder o contexto do evento.
+  clip_fps: 12.0

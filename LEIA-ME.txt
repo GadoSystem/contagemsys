@@ -1,0 +1,6 @@
+Arquivos alterados para corrigir desempenho com duas webcams.
+
+Se voce for substituir somente os arquivos, mantenha o mesmo caminho na raiz do ContagemSys.
+Recomendado: usar o ZIP completo contagemsys-v4.1-performance.zip para evitar misturar versoes.
+
+IMPORTANTE: preserve o seu arquivo .env atual, pois ele contem CONTAGEM_API_KEY.

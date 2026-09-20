@@ -6,11 +6,13 @@ from typing import Any
 
 
 class SharedState:
-    def __init__(self, max_events: int = 200) -> None:
+    def __init__(self, camera_id: str, camera_name: str, max_events: int = 200) -> None:
         self._lock = RLock()
         self._max_events = max_events
         self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
         self._data: dict[str, Any] = {
+            "camera_id": camera_id,
+            "camera_name": camera_name,
             "total_contado": 0,
             "animais_no_frame_agora": 0,
             "retornos_esquerda_para_direita": 0,
@@ -18,10 +20,15 @@ class SharedState:
             "fps_ia": 0.0,
             "fps_camera": 0.0,
             "latencia_ia_ms": 0.0,
+            "espera_fila_ia_ms": 0.0,
+            "fps_ia_alvo": 0.0,
+            "resolucao_camera": None,
+            "fps_camera_configurado": 0.0,
             "sistema_rodando": False,
             "session_id": None,
             "tracker": None,
             "modelo": None,
+            "ultimo_erro": None,
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -52,3 +59,32 @@ class SharedState:
             self._data["retornos_esquerda_para_direita"] = 0
             self._data["session_id"] = session_id
             self._events.clear()
+
+
+class LiveFrameStore:
+    """Armazena o ultimo frame anotado para janela local e API sem travar a inferencia."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._jpeg: bytes | None = None
+        self._display: Any | None = None
+        self._version = 0
+        self._display_version = 0
+
+    def update_display(self, display_frame: Any) -> None:
+        with self._lock:
+            self._display = display_frame.copy()
+            self._display_version += 1
+
+    def update_jpeg(self, jpeg_bytes: bytes) -> None:
+        with self._lock:
+            self._jpeg = bytes(jpeg_bytes)
+            self._version += 1
+
+    def jpeg(self) -> tuple[int, bytes | None]:
+        with self._lock:
+            return self._version, self._jpeg
+
+    def display(self) -> tuple[int, Any | None]:
+        with self._lock:
+            return self._display_version, None if self._display is None else self._display.copy()

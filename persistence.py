@@ -19,12 +19,28 @@ class EventDatabase:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        if column not in self._columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    camera_id TEXT NOT NULL DEFAULT 'legacy',
                     started_at TEXT NOT NULL,
                     ended_at TEXT,
                     note TEXT
@@ -33,6 +49,7 @@ class EventDatabase:
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id INTEGER NOT NULL,
+                    camera_id TEXT NOT NULL DEFAULT 'legacy',
                     track_id INTEGER NOT NULL,
                     timestamp TEXT NOT NULL,
                     direction TEXT NOT NULL,
@@ -43,34 +60,52 @@ class EventDatabase:
                     clip_path TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
                 );
-
-                CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, id DESC);
-                CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
                 """
             )
 
-    def start_session(self, note: str | None = None) -> int:
+            # Migra automaticamente bancos V3 sem apagar dados.
+            self._ensure_column(conn, "sessions", "camera_id", "TEXT NOT NULL DEFAULT 'legacy'")
+            self._ensure_column(conn, "events", "camera_id", "TEXT NOT NULL DEFAULT 'legacy'")
+
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sessions_camera
+                    ON sessions(camera_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_events_session
+                    ON events(session_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_events_camera
+                    ON events(camera_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_events_timestamp
+                    ON events(timestamp DESC);
+                """
+            )
+
+    def start_session(self, camera_id: str, note: str | None = None) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as conn:
-            conn.execute("UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL", (now,))
+            conn.execute(
+                "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL AND camera_id = ?",
+                (now, camera_id),
+            )
             cur = conn.execute(
-                "INSERT INTO sessions(started_at, note) VALUES (?, ?)",
-                (now, note),
+                "INSERT INTO sessions(camera_id, started_at, note) VALUES (?, ?, ?)",
+                (camera_id, now, note),
             )
             return int(cur.lastrowid)
 
-    def insert_event(self, session_id: int, event: dict[str, Any]) -> int:
+    def insert_event(self, session_id: int, camera_id: str, event: dict[str, Any]) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO events(
-                    session_id, track_id, timestamp, direction, counted,
+                    session_id, camera_id, track_id, timestamp, direction, counted,
                     confidence, frame_index, snapshot_path, clip_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
+                    camera_id,
                     int(event["track_id"]),
                     now,
                     str(event["direcao"]),
@@ -83,7 +118,12 @@ class EventDatabase:
             )
             return int(cur.lastrowid)
 
-    def update_evidence(self, event_id: int, snapshot_path: str | None = None, clip_path: str | None = None) -> None:
+    def update_evidence(
+        self,
+        event_id: int,
+        snapshot_path: str | None = None,
+        clip_path: str | None = None,
+    ) -> None:
         sets: list[str] = []
         values: list[Any] = []
         if snapshot_path is not None:
@@ -103,23 +143,41 @@ class EventDatabase:
             row = conn.execute("SELECT * FROM events WHERE id = ?", (int(event_id),)).fetchone()
         return dict(row) if row else None
 
-    def list_events(self, limit: int = 200, session_id: int | None = None) -> list[dict[str, Any]]:
+    def list_events(
+        self,
+        limit: int = 200,
+        session_id: int | None = None,
+        camera_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 2000))
+        clauses: list[str] = []
+        values: list[Any] = []
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            values.append(int(session_id))
+        if camera_id is not None:
+            clauses.append("camera_id = ?")
+            values.append(camera_id)
+
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.append(limit)
         with self._lock, self._connect() as conn:
-            if session_id is None:
+            rows = conn.execute(
+                f"SELECT * FROM events{where} ORDER BY id DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_sessions(self, limit: int = 50, camera_id: str | None = None) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with self._lock, self._connect() as conn:
+            if camera_id is None:
                 rows = conn.execute(
-                    "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
+                    "SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (limit,)
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM events WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-                    (session_id, limit),
+                    "SELECT * FROM sessions WHERE camera_id = ? ORDER BY id DESC LIMIT ?",
+                    (camera_id, limit),
                 ).fetchall()
-        return [dict(row) for row in rows]
-
-    def list_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (max(1, min(limit, 500)),)
-            ).fetchall()
         return [dict(row) for row in rows]

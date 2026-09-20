@@ -1,17 +1,27 @@
 # Changelog
 
-## V3
+## V4.0.0
 
-- Substituída a contagem por linha única por gate de três zonas.
-- Âncora de tracking alterada para bottom-center.
-- Adicionada estabilidade de zona e limpeza de tracks antigos.
-- Bloqueio de contagem duplicada do mesmo ID.
-- ROI configurável.
-- Configuração centralizada em YAML.
-- Persistência SQLite com sessões e eventos.
-- Snapshots e clipes de evidência por evento.
-- API ampliada com sessões, detalhes e arquivos de evidência.
-- Benchmark unitário e suíte de benchmark com ground truth.
-- Suporte configurável a ByteTrack, FastTrack, BoT-SORT e outros trackers do Ultralytics.
-- Exportadores OpenVINO e ONNX.
-- Testes automatizados para contador, estado e persistência.
+- suporte a múltiplas câmeras simultâneas;
+- tracker/contador/estado/sessão/evidência independentes por câmera;
+- configuração `video.cameras` com overrides individuais de ROI/gate/stride;
+- API autenticada por `X-API-Key` via variável `CONTAGEM_API_KEY`;
+- host padrão `0.0.0.0` para consumo na rede local;
+- endpoints `/cameras`, `/frame.jpg` e `/stream.mjpg`;
+- contagem agregada entre câmeras;
+- persistência com `camera_id` e migração automática do SQLite V3;
+- `.env.example` e proteção do `.env` no `.gitignore`;
+- utilitário `listar_cameras.py`;
+- testes atualizados para multi-câmera.
+
+## V4.1 - desempenho multi-camera
+
+- separada captura/renderização da inferência YOLO;
+- vídeo local não fica mais bloqueado pelo tempo de inferência;
+- coordenador global limita inferências simultâneas e evita saturação de CPU;
+- PyTorch usa quantidade controlada de threads em CPU;
+- webcams usam 640x480, MJPG e backend otimizado por padrão;
+- stream da API usa JPEG menor e sem sidebar por padrão;
+- evidências reduzidas para 12 FPS e janela de 2s para diminuir cópias/escrita;
+- métricas adicionais de fila de IA, resolução e FPS alvo;
+- integração Rebano passa a usar MJPEG contínuo em vez de polling ~1,5 FPS.
