@@ -1,5 +1,15 @@
 # Changelog
 
+## V5.0.0 — login e vínculo câmera/usuário
+
+- login web do ContagemSys validado pelo backend do Rebano;
+- painel do usuário mostra somente as câmeras vinculadas ao seu `Usuario.Id`;
+- tela `/admin` para vínculo manual câmera -> usuário;
+- vínculos persistidos no SQLite;
+- integração servidor-a-servidor protegida por `X-Integration-Key`;
+- frontend web simples para teste de login, câmeras e contagem;
+- endpoints próprios para o backend do Rebano consumir as câmeras do usuário logado.
+
 ## V4.0.0
 
 - suporte a múltiplas câmeras simultâneas;

@@ -14,4 +14,3 @@ benchmark_results.csv
 *.onnx
 *_openvino_model/
 *.engine
-

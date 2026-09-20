@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from ultralytics import YOLO
 
 from api import create_app
+from auth import AuthService
 from camera_stream import LatestFrameCamera
 from config import load_config, resolve_project_path, resolve_tracker
 from counting import GateCounter
@@ -24,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sistema de contagem direcional V4 - multi-camera")
+    parser = argparse.ArgumentParser(description="Sistema de contagem direcional V5 - multi-camera web")
     parser.add_argument("--config", default=str(BASE_DIR / "config.yaml"))
     return parser.parse_args()
 
@@ -573,15 +574,31 @@ def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
 
-    auth_cfg = cfg["api"]["auth"]
-    auth_enabled = bool(auth_cfg.get("enabled", True))
-    api_key_env = str(auth_cfg.get("api_key_env", "CONTAGEM_API_KEY"))
-    api_key = os.getenv(api_key_env)
-    if auth_enabled and not api_key:
+    rebano_api_url = os.getenv("REBANO_API_URL", "http://localhost:5148").rstrip("/")
+    jwt_secret = os.getenv("CONTAGEM_JWT_SECRET")
+    integration_key = os.getenv("CONTAGEM_INTEGRATION_KEY")
+    admin_user = os.getenv("CONTAGEM_ADMIN_USER", "admin")
+    admin_password = os.getenv("CONTAGEM_ADMIN_PASSWORD")
+
+    missing = []
+    if not jwt_secret:
+        missing.append("CONTAGEM_JWT_SECRET")
+    if not integration_key:
+        missing.append("CONTAGEM_INTEGRATION_KEY")
+    if not admin_password:
+        missing.append("CONTAGEM_ADMIN_PASSWORD")
+    if missing:
         raise RuntimeError(
-            f"Autenticacao ativa, mas a variavel {api_key_env} nao foi definida. "
-            "Copie .env.example para .env e configure uma chave."
+            "Variaveis obrigatorias ausentes no .env: " + ", ".join(missing)
         )
+
+    auth_service = AuthService(
+        rebano_api_url=rebano_api_url,
+        jwt_secret=jwt_secret,
+        integration_key=integration_key,
+        admin_user=admin_user,
+        admin_password=admin_password,
+    )
 
     torch_threads = configure_runtime(cfg)
     max_concurrent = int(cfg.get("performance", {}).get("max_concurrent_inferences", 1))
@@ -603,8 +620,8 @@ def main() -> int:
         camera_contexts,
         db,
         reset_all,
-        api_key=api_key,
-        auth_enabled=auth_enabled,
+        auth_service=auth_service,
+        integration_key=integration_key,
         stream_fps=int(cfg["api"]["stream_fps"]),
     )
     server = uvicorn.Server(
@@ -622,7 +639,9 @@ def main() -> int:
         worker.start()
 
     port = int(cfg["app"]["port"])
-    print("\nSistema de contagem V4 iniciado.")
+    print("\nContagemSys Web V5 iniciado.")
+    print(f"Login web:     http://127.0.0.1:{port}/")
+    print(f"Admin web:     http://127.0.0.1:{port}/admin")
     print(f"Swagger local: http://127.0.0.1:{port}/docs")
     print(f"Health:        http://127.0.0.1:{port}/health")
     print("Para outra maquina, troque 127.0.0.1 pelo IPv4 desta maquina.")

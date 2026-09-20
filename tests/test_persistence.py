@@ -49,6 +49,19 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(len(db.list_sessions(camera_id="camera_1")), 1)
             self.assertEqual(len(db.list_sessions(camera_id="camera_2")), 1)
 
+    def test_camera_owner_can_be_linked_and_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = EventDatabase(Path(tmp) / "test.db")
+            db.set_camera_owner("camera_1", 7, "Guilherme", "gui@teste.com")
+
+            owner = db.get_camera_owner("camera_1")
+            self.assertIsNotNone(owner)
+            self.assertEqual(owner["usuario_id"], 7)
+            self.assertEqual(len(db.list_camera_owners(usuario_id=7)), 1)
+
+            db.remove_camera_owner("camera_1")
+            self.assertIsNone(db.get_camera_owner("camera_1"))
+
 
 if __name__ == "__main__":
     unittest.main()

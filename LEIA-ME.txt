@@ -1,6 +1,11 @@
-Arquivos alterados para corrigir desempenho com duas webcams.
+ContagemSys V5
 
-Se voce for substituir somente os arquivos, mantenha o mesmo caminho na raiz do ContagemSys.
-Recomendado: usar o ZIP completo contagemsys-v4.1-performance.zip para evitar misturar versoes.
+Leia o arquivo README.md.
 
-IMPORTANTE: preserve o seu arquivo .env atual, pois ele contem CONTAGEM_API_KEY.
+Resumo:
+- /              login do usuário usando a conta do Rebano
+- /painel        câmeras vinculadas ao usuário logado
+- /admin         vínculo manual câmera -> usuário
+- /docs          Swagger da API
+
+Para teste local, execute primeiro o backend do Rebano e depois: python main.py

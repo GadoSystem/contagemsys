@@ -60,6 +60,14 @@ class EventDatabase:
                     clip_path TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS camera_owners (
+                    camera_id TEXT PRIMARY KEY,
+                    usuario_id INTEGER NOT NULL,
+                    usuario_nome TEXT NOT NULL,
+                    usuario_email TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -179,5 +187,53 @@ class EventDatabase:
                 rows = conn.execute(
                     "SELECT * FROM sessions WHERE camera_id = ? ORDER BY id DESC LIMIT ?",
                     (camera_id, limit),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+
+    def set_camera_owner(
+        self,
+        camera_id: str,
+        usuario_id: int,
+        usuario_nome: str,
+        usuario_email: str | None = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO camera_owners(camera_id, usuario_id, usuario_nome, usuario_email, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(camera_id) DO UPDATE SET
+                    usuario_id = excluded.usuario_id,
+                    usuario_nome = excluded.usuario_nome,
+                    usuario_email = excluded.usuario_email,
+                    updated_at = excluded.updated_at
+                """,
+                (camera_id, int(usuario_id), usuario_nome, usuario_email, now),
+            )
+
+    def remove_camera_owner(self, camera_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM camera_owners WHERE camera_id = ?", (camera_id,))
+
+    def get_camera_owner(self, camera_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM camera_owners WHERE camera_id = ?",
+                (camera_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_camera_owners(self, usuario_id: int | None = None) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            if usuario_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM camera_owners ORDER BY camera_id"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM camera_owners WHERE usuario_id = ? ORDER BY camera_id",
+                    (int(usuario_id),),
                 ).fetchall()
         return [dict(row) for row in rows]

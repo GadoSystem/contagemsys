@@ -6,15 +6,34 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Security
-from fastapi.responses import FileResponse, Response, StreamingResponse
-from fastapi.security import APIKeyHeader
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Security
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
+from auth import AuthService, AuthenticationError, IntegrationError
 from persistence import EventDatabase
-from state import LiveFrameStore, SharedState
+from state import LiveFrameStore
+from web_ui import ADMIN_HTML, LOGIN_HTML, PANEL_HTML
 
 
 CameraApiContext = dict[str, Any]
+
+
+class LoginRequest(BaseModel):
+    login: str
+    senha: str
+
+
+class AdminLoginRequest(BaseModel):
+    usuario: str
+    senha: str
+
+
+class CameraOwnerRequest(BaseModel):
+    usuario_id: int
+    nome: str
+    email: str | None = None
 
 
 def create_app(
@@ -22,30 +41,54 @@ def create_app(
     db: EventDatabase,
     reset_all_callback: Callable[[], dict[str, int]],
     *,
-    api_key: str | None,
-    auth_enabled: bool = True,
+    auth_service: AuthService,
+    integration_key: str,
     stream_fps: int = 10,
 ) -> FastAPI:
     app = FastAPI(
-        title="API de Contagem do Rebanho",
-        version="4.1.0",
+        title="ContagemSys - API Web",
+        version="5.0.0",
         description=(
-            "API autenticada para consultar multiplas cameras, contagem, eventos, sessoes "
-            "e imagens em tempo real do sistema de visao computacional."
+            "Contagem multi-camera com login pelo Rebano, vinculo manual camera/usuario "
+            "e integracao segura com o backend do Rebano."
         ),
     )
 
-    api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+    bearer = HTTPBearer(auto_error=False)
 
-    def require_api_key(received: str | None = Security(api_key_header)) -> None:
-        if not auth_enabled:
-            return
-        if not api_key:
-            raise HTTPException(status_code=503, detail="Autenticacao da API nao configurada")
-        if not received or not secrets.compare_digest(received, api_key):
-            raise HTTPException(status_code=401, detail="API key invalida ou ausente")
+    def _decode_token(credentials: HTTPAuthorizationCredentials | None) -> dict[str, Any]:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Token ausente")
+        try:
+            return auth_service.decode_token(credentials.credentials)
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
 
-    protected = APIRouter(dependencies=[Depends(require_api_key)])
+    def require_user(
+        credentials: HTTPAuthorizationCredentials | None = Security(bearer),
+    ) -> dict[str, Any]:
+        payload = _decode_token(credentials)
+        if payload.get("role") != "user":
+            raise HTTPException(status_code=403, detail="Acesso de usuario necessario")
+        try:
+            payload["usuario_id"] = int(payload["sub"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=401, detail="Token sem usuario valido") from exc
+        return payload
+
+    def require_admin(
+        credentials: HTTPAuthorizationCredentials | None = Security(bearer),
+    ) -> dict[str, Any]:
+        payload = _decode_token(credentials)
+        if payload.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Acesso de administrador necessario")
+        return payload
+
+    def require_integration_key(
+        received: str | None = Header(default=None, alias="X-Integration-Key"),
+    ) -> None:
+        if not received or not secrets.compare_digest(received, integration_key):
+            raise HTTPException(status_code=401, detail="Chave de integracao invalida")
 
     def get_camera(camera_id: str) -> CameraApiContext:
         camera = cameras.get(camera_id)
@@ -53,140 +96,42 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' nao encontrada")
         return camera
 
-    @protected.get("/health")
-    def health() -> dict:
-        snapshots = [ctx["state"].snapshot() for ctx in cameras.values()]
-        running = sum(1 for snap in snapshots if snap["sistema_rodando"])
-        return {
-            "status": "ok" if running else "degraded",
-            "versao": "4.1.0",
-            "cameras_configuradas": len(snapshots),
-            "cameras_rodando": running,
-        }
-
-    @protected.get("/cameras")
-    def list_cameras() -> list[dict]:
-        result: list[dict] = []
-        for camera_id, ctx in cameras.items():
-            snap = ctx["state"].snapshot()
-            result.append(
-                {
-                    "id": camera_id,
-                    "name": snap["camera_name"],
-                    "status": "online" if snap["sistema_rodando"] else "offline",
-                    "total_contado": snap["total_contado"],
-                    "animais_no_frame_agora": snap["animais_no_frame_agora"],
-                    "retornos_esquerda_para_direita": snap["retornos_esquerda_para_direita"],
-                    "fps_camera": snap["fps_camera"],
-                    "fps_ia": snap["fps_ia"],
-                    "latencia_ia_ms": snap["latencia_ia_ms"],
-                    "espera_fila_ia_ms": snap.get("espera_fila_ia_ms", 0.0),
-                    "fps_ia_alvo": snap.get("fps_ia_alvo"),
-                    "resolucao_camera": snap.get("resolucao_camera"),
-                    "session_id": snap["session_id"],
-                    "ultimo_erro": snap.get("ultimo_erro"),
-                    "frame_url": f"/cameras/{camera_id}/frame.jpg",
-                    "stream_url": f"/cameras/{camera_id}/stream.mjpg",
-                }
-            )
-        return result
-
-    @protected.get("/contagem/atual")
-    def aggregate_count() -> dict:
-        snaps = [ctx["state"].snapshot() for ctx in cameras.values()]
-        return {
-            "total_contado": sum(int(s["total_contado"]) for s in snaps),
-            "animais_no_frame_agora": sum(int(s["animais_no_frame_agora"]) for s in snaps),
-            "retornos_esquerda_para_direita": sum(
-                int(s["retornos_esquerda_para_direita"]) for s in snaps
-            ),
-            "cameras_online": sum(1 for s in snaps if s["sistema_rodando"]),
-            "cameras_total": len(snaps),
-            "cameras": snaps,
-        }
-
-    @protected.get("/cameras/{camera_id}/contagem/atual")
-    def current_count(camera_id: str) -> dict:
-        return get_camera(camera_id)["state"].snapshot()
-
-    @protected.get("/contagem/eventos")
-    def events(
-        limit: int = Query(default=100, ge=1, le=2000),
-        camera_id: str | None = Query(default=None),
-    ) -> list[dict]:
-        if camera_id is not None:
-            get_camera(camera_id)
-        return db.list_events(limit=limit, camera_id=camera_id)
-
-    @protected.get("/cameras/{camera_id}/contagem/eventos")
-    def camera_events(camera_id: str, limit: int = Query(default=100, ge=1, le=2000)) -> list[dict]:
-        get_camera(camera_id)
-        return db.list_events(limit=limit, camera_id=camera_id)
-
-    @protected.get("/contagem/sessoes")
-    def sessions(
-        limit: int = Query(default=50, ge=1, le=500),
-        camera_id: str | None = Query(default=None),
-    ) -> list[dict]:
-        if camera_id is not None:
-            get_camera(camera_id)
-        return db.list_sessions(limit=limit, camera_id=camera_id)
-
-    @protected.get("/cameras/{camera_id}/contagem/sessoes")
-    def camera_sessions(camera_id: str, limit: int = Query(default=50, ge=1, le=500)) -> list[dict]:
-        get_camera(camera_id)
-        return db.list_sessions(limit=limit, camera_id=camera_id)
-
-    @protected.get("/contagem/eventos/{event_id}")
-    def event_detail(event_id: int) -> dict:
-        event = db.get_event(event_id)
-        if event is None:
-            raise HTTPException(status_code=404, detail="Evento nao encontrado")
-        return event
-
-    def _event_file(event_id: int, field: str) -> FileResponse:
-        event = db.get_event(event_id)
-        if event is None:
-            raise HTTPException(status_code=404, detail="Evento nao encontrado")
-        value = event.get(field)
-        if not value:
-            raise HTTPException(status_code=404, detail="Evidencia ainda nao disponivel")
-        path = Path(value)
-        if not path.exists() or not path.is_file():
-            raise HTTPException(status_code=404, detail="Arquivo de evidencia nao encontrado")
-        return FileResponse(path)
-
-    @protected.get("/contagem/eventos/{event_id}/snapshot")
-    def event_snapshot(event_id: int):
-        return _event_file(event_id, "snapshot_path")
-
-    @protected.get("/contagem/eventos/{event_id}/clip")
-    def event_clip(event_id: int):
-        return _event_file(event_id, "clip_path")
-
-    @protected.post("/contagem/resetar")
-    def reset_all() -> dict:
-        sessions = reset_all_callback()
-        return {
-            "ok": True,
-            "mensagem": "Todas as cameras foram reiniciadas e receberam novas sessoes.",
-            "sessions": sessions,
-        }
-
-    @protected.post("/cameras/{camera_id}/contagem/resetar")
-    def reset_camera(camera_id: str) -> dict:
+    def require_owner(camera_id: str, usuario_id: int) -> CameraApiContext:
         camera = get_camera(camera_id)
-        new_session = camera["reset"]()
+        owner = db.get_camera_owner(camera_id)
+        if owner is None or int(owner["usuario_id"]) != int(usuario_id):
+            raise HTTPException(status_code=404, detail="Camera nao encontrada para este usuario")
+        return camera
+
+    def camera_summary(camera_id: str, ctx: CameraApiContext) -> dict[str, Any]:
+        snap = ctx["state"].snapshot()
+        owner = db.get_camera_owner(camera_id)
         return {
-            "ok": True,
-            "camera_id": camera_id,
-            "session_id": new_session,
-            "mensagem": "Contadores da camera zerados.",
+            "id": camera_id,
+            "name": snap["camera_name"],
+            "status": "online" if snap["sistema_rodando"] else "offline",
+            "total_contado": snap["total_contado"],
+            "animais_no_frame_agora": snap["animais_no_frame_agora"],
+            "retornos_esquerda_para_direita": snap["retornos_esquerda_para_direita"],
+            "fps_camera": snap["fps_camera"],
+            "fps_ia": snap["fps_ia"],
+            "latencia_ia_ms": snap["latencia_ia_ms"],
+            "session_id": snap["session_id"],
+            "ultimo_erro": snap.get("ultimo_erro"),
+            "usuario_id": int(owner["usuario_id"]) if owner else None,
+            "usuario_nome": owner["usuario_nome"] if owner else None,
+            "usuario_email": owner["usuario_email"] if owner else None,
         }
 
-    @protected.get("/cameras/{camera_id}/frame.jpg")
-    def camera_frame(camera_id: str) -> Response:
-        camera = get_camera(camera_id)
+    def cameras_for_user(usuario_id: int) -> list[dict[str, Any]]:
+        owned = {row["camera_id"] for row in db.list_camera_owners(usuario_id=usuario_id)}
+        return [
+            camera_summary(camera_id, ctx)
+            for camera_id, ctx in cameras.items()
+            if camera_id in owned
+        ]
+
+    def jpeg_response(camera: CameraApiContext) -> Response:
         frame_store: LiveFrameStore = camera["frames"]
         _, jpeg = frame_store.jpeg()
         if jpeg is None:
@@ -197,9 +142,7 @@ def create_app(
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
-    @protected.get("/cameras/{camera_id}/stream.mjpg")
-    async def camera_stream(camera_id: str) -> StreamingResponse:
-        camera = get_camera(camera_id)
+    def mjpeg_response(camera: CameraApiContext) -> StreamingResponse:
         frame_store: LiveFrameStore = camera["frames"]
         delay = 1.0 / max(1, min(int(stream_fps), 30))
 
@@ -224,5 +167,167 @@ def create_app(
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
-    app.include_router(protected)
+    # -------------------- Interface web --------------------
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def login_page() -> str:
+        return LOGIN_HTML
+
+    @app.get("/painel", response_class=HTMLResponse, include_in_schema=False)
+    def panel_page() -> str:
+        return PANEL_HTML
+
+    @app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+    def admin_page() -> str:
+        return ADMIN_HTML
+
+    # -------------------- Autenticacao --------------------
+
+    @app.post("/api/auth/login")
+    async def user_login(body: LoginRequest) -> dict[str, Any]:
+        try:
+            return await auth_service.login_user(body.login, body.senha)
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except IntegrationError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/auth/admin/login")
+    def admin_login(body: AdminLoginRequest) -> dict[str, Any]:
+        try:
+            return auth_service.login_admin(body.usuario, body.senha)
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    # -------------------- Usuario logado --------------------
+
+    @app.get("/api/minhas-cameras")
+    def my_cameras(user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        return cameras_for_user(user["usuario_id"])
+
+    @app.get("/api/minhas-cameras/{camera_id}/contagem")
+    def my_camera_count(
+        camera_id: str,
+        user: dict[str, Any] = Depends(require_user),
+    ) -> dict[str, Any]:
+        camera = require_owner(camera_id, user["usuario_id"])
+        return camera["state"].snapshot()
+
+    @app.get("/api/minhas-cameras/{camera_id}/frame.jpg")
+    def my_camera_frame(
+        camera_id: str,
+        user: dict[str, Any] = Depends(require_user),
+    ) -> Response:
+        return jpeg_response(require_owner(camera_id, user["usuario_id"]))
+
+    @app.get("/api/minhas-cameras/{camera_id}/stream.mjpg")
+    def my_camera_stream(
+        camera_id: str,
+        user: dict[str, Any] = Depends(require_user),
+    ) -> StreamingResponse:
+        return mjpeg_response(require_owner(camera_id, user["usuario_id"]))
+
+    @app.get("/api/minhas-cameras/{camera_id}/eventos")
+    def my_camera_events(
+        camera_id: str,
+        limit: int = Query(default=100, ge=1, le=1000),
+        user: dict[str, Any] = Depends(require_user),
+    ) -> list[dict[str, Any]]:
+        require_owner(camera_id, user["usuario_id"])
+        return db.list_events(limit=limit, camera_id=camera_id)
+
+    # -------------------- Administracao dos vinculos --------------------
+
+    @app.get("/api/admin/usuarios")
+    async def admin_users(_: dict[str, Any] = Depends(require_admin)) -> list[dict[str, Any]]:
+        try:
+            return await auth_service.list_rebano_users()
+        except IntegrationError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/api/admin/cameras")
+    def admin_cameras(_: dict[str, Any] = Depends(require_admin)) -> list[dict[str, Any]]:
+        return [camera_summary(camera_id, ctx) for camera_id, ctx in cameras.items()]
+
+    @app.put("/api/admin/cameras/{camera_id}/vinculo")
+    def link_camera(
+        camera_id: str,
+        body: CameraOwnerRequest,
+        _: dict[str, Any] = Depends(require_admin),
+    ) -> dict[str, Any]:
+        get_camera(camera_id)
+        db.set_camera_owner(camera_id, body.usuario_id, body.nome, body.email)
+        return {"ok": True, "camera_id": camera_id, "usuario_id": body.usuario_id}
+
+    @app.delete("/api/admin/cameras/{camera_id}/vinculo")
+    def unlink_camera(
+        camera_id: str,
+        _: dict[str, Any] = Depends(require_admin),
+    ) -> dict[str, Any]:
+        get_camera(camera_id)
+        db.remove_camera_owner(camera_id)
+        return {"ok": True, "camera_id": camera_id}
+
+    @app.post("/api/admin/contagem/resetar")
+    def reset_all(_: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+        return {"ok": True, "sessions": reset_all_callback()}
+
+    # -------------------- Integracao servidor-a-servidor com o Rebano --------------------
+
+    @app.get(
+        "/api/integracao/usuarios/{usuario_id}/cameras",
+        dependencies=[Depends(require_integration_key)],
+    )
+    def integration_cameras(usuario_id: int) -> list[dict[str, Any]]:
+        return cameras_for_user(usuario_id)
+
+    @app.get(
+        "/api/integracao/usuarios/{usuario_id}/cameras/{camera_id}/frame.jpg",
+        dependencies=[Depends(require_integration_key)],
+    )
+    def integration_frame(usuario_id: int, camera_id: str) -> Response:
+        return jpeg_response(require_owner(camera_id, usuario_id))
+
+    @app.get(
+        "/api/integracao/usuarios/{usuario_id}/cameras/{camera_id}/stream.mjpg",
+        dependencies=[Depends(require_integration_key)],
+    )
+    def integration_stream(usuario_id: int, camera_id: str) -> StreamingResponse:
+        return mjpeg_response(require_owner(camera_id, usuario_id))
+
+    @app.get(
+        "/api/integracao/usuarios/{usuario_id}/cameras/{camera_id}/eventos",
+        dependencies=[Depends(require_integration_key)],
+    )
+    def integration_events(
+        usuario_id: int,
+        camera_id: str,
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> list[dict[str, Any]]:
+        require_owner(camera_id, usuario_id)
+        return db.list_events(limit=limit, camera_id=camera_id)
+
+    # -------------------- Diagnostico --------------------
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        snapshots = [ctx["state"].snapshot() for ctx in cameras.values()]
+        running = sum(1 for snap in snapshots if snap["sistema_rodando"])
+        return {
+            "status": "ok" if running else "degraded",
+            "versao": "5.0.0",
+            "cameras_configuradas": len(snapshots),
+            "cameras_rodando": running,
+        }
+
+    @app.get("/api/admin/eventos/{event_id}/snapshot", dependencies=[Depends(require_admin)])
+    def event_snapshot(event_id: int):
+        event = db.get_event(event_id)
+        if event is None or not event.get("snapshot_path"):
+            raise HTTPException(status_code=404, detail="Snapshot nao encontrado")
+        path = Path(event["snapshot_path"])
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Arquivo nao encontrado")
+        return FileResponse(path)
+
     return app

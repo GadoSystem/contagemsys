@@ -12,16 +12,12 @@ CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {
-        "name": "Contagem V4",
+        "name": "Contagem V5",
         "host": "0.0.0.0",
         "port": 8000,
         "show_window": True,
     },
     "api": {
-        "auth": {
-            "enabled": True,
-            "api_key_env": "CONTAGEM_API_KEY",
-        },
         "jpeg_quality": 72,
         "stream_fps": 10,
         "include_sidebar": False,
@@ -180,10 +176,6 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     video["cameras"] = normalized_cameras
 
     api_cfg = cfg.setdefault("api", {})
-    auth_cfg = api_cfg.setdefault("auth", {})
-    if bool(auth_cfg.get("enabled", True)) and not str(auth_cfg.get("api_key_env", "")).strip():
-        raise ValueError("api.auth.api_key_env deve informar o nome da variavel de ambiente")
-
     jpeg_quality = int(api_cfg.get("jpeg_quality", 82))
     if not 40 <= jpeg_quality <= 100:
         raise ValueError("api.jpeg_quality deve ficar entre 40 e 100")

@@ -1,15 +1,12 @@
 app:
-  name: "Sistema de Contagem em Tempo Real - V4.1 Performance"
+  name: "Sistema de Contagem em Tempo Real - V5 Web"
   # 0.0.0.0 permite que outra maquina da mesma rede acesse a API.
   host: "0.0.0.0"
   port: 8000
   show_window: true
 
 api:
-  auth:
-    enabled: true
-    # O valor real NAO fica neste arquivo. Ele vem da variavel de ambiente abaixo.
-    api_key_env: "CONTAGEM_API_KEY"
+  # Login e integracao sao configurados no .env.
   # Menor qualidade reduz CPU/rede sem prejudicar o acompanhamento no Rebano.
   jpeg_quality: 72
   # O video da API nao precisa acompanhar os 30 FPS da webcam.
