@@ -39,7 +39,10 @@ video:
   width: 640
   height: 480
   fps: 30
-  backend: "auto"
+  # "dshow" fixo no Windows: com "auto", uma camera podia abrir por DirectShow e a
+  # outra por Media Foundation, que numeram as webcams em ordem diferente, e as duas
+  # acabavam lendo a mesma camera fisica.
+  backend: "dshow"
   fourcc: "MJPG"
 
   # FPS alvo da IA por camera. O video local continua em ~20 FPS independente disso.

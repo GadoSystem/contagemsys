@@ -61,10 +61,14 @@ class LatestFrameCamera:
         if not isinstance(source, int):
             return [("default", None)]
 
+        # Backend escolhido explicitamente nao cai para outro: DirectShow e Media
+        # Foundation numeram as webcams em ordens diferentes, entao o indice 1 de um
+        # pode ser a mesma camera fisica que o indice 0 do outro (duas cameras
+        # mostrando a mesma imagem). Melhor falhar com erro claro.
         if self.backend == "dshow":
-            return [("dshow", cv2.CAP_DSHOW), ("default", None)]
+            return [("dshow", cv2.CAP_DSHOW)]
         if self.backend == "msmf":
-            return [("msmf", cv2.CAP_MSMF), ("default", None)]
+            return [("msmf", cv2.CAP_MSMF)]
         if self.backend == "default":
             return [("default", None)]
 
@@ -78,15 +82,17 @@ class LatestFrameCamera:
         return [("default", None)]
 
     def _configure_capture(self, cap: cv2.VideoCapture) -> None:
-        # MJPG reduz o trafego USB de duas webcams quando o dispositivo suporta.
-        if self.fourcc and len(self.fourcc) == 4:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
         if self.width:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.width))
         if self.height:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.height))
         if self.requested_fps:
             cap.set(cv2.CAP_PROP_FPS, int(self.requested_fps))
+        # MJPG reduz o trafego USB de duas webcams quando o dispositivo suporta.
+        # No DirectShow o FOURCC so vale se vier DEPOIS da resolucao: antes, a
+        # troca de resolucao volta a camera para YUY2 (sem compressao, ~18 MB/s).
+        if self.fourcc and len(self.fourcc) == 4:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def start(self) -> "LatestFrameCamera":

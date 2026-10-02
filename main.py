@@ -348,6 +348,31 @@ class CameraWorker:
             else:
                 time.sleep(0.001)
 
+    def _abrir_camera_com_retentativa(self) -> LatestFrameCamera | None:
+        """Abre a webcam; se falhar (ocupada, sem banda USB, desconectada), tenta de novo
+        a cada 5 s em vez de deixar a camera offline ate reiniciar o sistema."""
+        tentativa = 0
+        while not self._stop.is_set():
+            try:
+                return LatestFrameCamera(
+                    source=self.camera_cfg["source"],
+                    width=int(self.camera_cfg.get("width", 0)) or None,
+                    height=int(self.camera_cfg.get("height", 0)) or None,
+                    fps=int(self.camera_cfg.get("fps", 0)) or None,
+                    backend=str(self.camera_cfg.get("backend", "auto")),
+                    fourcc=str(self.camera_cfg.get("fourcc", "MJPG")),
+                ).start()
+            except RuntimeError as exc:
+                tentativa += 1
+                self.state.update_metrics(
+                    sistema_rodando=False,
+                    ultimo_erro=f"Aguardando camera (tentativa {tentativa}): {exc}",
+                )
+                if tentativa == 1 or tentativa % 12 == 0:
+                    print(f"[{self.camera_id}] camera indisponivel, tentando de novo a cada 5s: {exc}")
+                self._stop.wait(5.0)
+        return None
+
     def _run(self) -> None:
         model_cfg = self.cfg["model"]
         tracker = resolve_tracker(str(model_cfg["tracker"]))
@@ -358,14 +383,9 @@ class CameraWorker:
             # Um modelo por camera preserva o estado do ByteTrack de cada fonte.
             # As inferencias sao coordenadas globalmente para nao saturar a CPU.
             model = YOLO(str(model_cfg["path"]))
-            self._camera = LatestFrameCamera(
-                source=self.camera_cfg["source"],
-                width=int(self.camera_cfg.get("width", 0)) or None,
-                height=int(self.camera_cfg.get("height", 0)) or None,
-                fps=int(self.camera_cfg.get("fps", 0)) or None,
-                backend=str(self.camera_cfg.get("backend", "auto")),
-                fourcc=str(self.camera_cfg.get("fourcc", "MJPG")),
-            ).start()
+            self._camera = self._abrir_camera_com_retentativa()
+            if self._camera is None:
+                return  # encerramento pedido enquanto esperava a camera
 
             evidence_dir = resolve_project_path(self.cfg["evidence"]["directory"]) / self.camera_id
             self._evidence = EvidenceRecorder(
