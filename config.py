@@ -32,6 +32,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "torch_threads": 0,
         "opencv_threads": 1,
     },
+    "discovery": {
+        "enabled": True,
+        "webcam": {"enabled": True, "backend": "auto", "max_index": 6,
+                   "samples": 8, "accept_static_frames": False},
+        "onvif": {"enabled": True, "timeout_seconds": 2.0,
+                  "username_env": "ONVIF_USERNAME", "password_env": "ONVIF_PASSWORD"},
+        "ip_streams": [],
+    },
     "video": {
         "width": 640,
         "height": 480,
@@ -110,7 +118,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 
     # Compatibilidade com configuracoes antigas que usavam video.source.
     video = cfg.setdefault("video", {})
-    if "cameras" not in video or not video["cameras"]:
+    if "cameras" not in video or (not video["cameras"] and not cfg.get("discovery", {}).get("enabled", False)):
         legacy_source = video.get("source", 0)
         video["cameras"] = [
             {"id": "camera_1", "name": "Camera 1", "source": legacy_source, "enabled": True}
@@ -170,7 +178,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 
         normalized_cameras.append(camera)
 
-    if enabled_count < 1:
+    # Quando a descoberta automatica nao acha dispositivos, a API continua sem cameras.
+    if enabled_count < 1 and not cfg.get("discovery", {}).get("enabled", False):
         raise ValueError("Pelo menos uma camera deve estar com enabled: true")
 
     video["cameras"] = normalized_cameras

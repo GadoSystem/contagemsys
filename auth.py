@@ -50,6 +50,18 @@ class AuthService:
         }
         return jwt.encode(data, self.jwt_secret, algorithm="HS256")
 
+    def issue_stream_ticket(self, usuario_id: int, camera_id: str) -> str:
+        """Token limitado a uma unica camera e com validade curta (2 minutos).
+
+        O token permite iniciar um stream em <img>, que nao envia Authorization.
+        """
+        now = datetime.now(timezone.utc)
+        return jwt.encode(
+            {"role": "stream", "sub": str(usuario_id), "camera_id": camera_id,
+             "iss": "ContagemSys", "iat": now, "exp": now + timedelta(minutes=2)},
+            self.jwt_secret, algorithm="HS256",
+        )
+
     def decode_token(self, token: str) -> dict[str, Any]:
         try:
             payload = jwt.decode(

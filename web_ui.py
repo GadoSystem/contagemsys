@@ -24,9 +24,64 @@ const token=localStorage.getItem('contagem_token');if(!token)location.href='/';
 try{const u=JSON.parse(localStorage.getItem('contagem_usuario')||'{}');document.querySelector('#user').textContent=u.nome||''}catch{}
 document.querySelector('#logout').onclick=()=>{localStorage.removeItem('contagem_token');localStorage.removeItem('contagem_usuario');location.href='/'};
 const auth={'Authorization':'Bearer '+token};const grid=document.querySelector('#grid'),msg=document.querySelector('#message');
-function card(c){const el=document.createElement('article');el.className='camera';el.innerHTML=`<img alt="${c.name}" data-camera="${c.id}"><div class="meta"><div class="row"><strong>${c.name}</strong><span class="status ${c.status==='online'?'online':'offline'}">${c.status.toUpperCase()}</span></div><small>${c.id}</small><div class="metrics"><div class="metric"><small>Contados</small><b>${c.total_contado}</b></div><div class="metric"><small>No frame</small><b>${c.animais_no_frame_agora}</b></div><div class="metric"><small>FPS IA</small><b>${Number(c.fps_ia||0).toFixed(1)}</b></div></div></div>`;grid.appendChild(el);pollFrame(c.id,el.querySelector('img'));}
-async function pollFrame(id,img){let oldUrl=null;while(document.body.contains(img)){try{const r=await fetch(`/api/minhas-cameras/${encodeURIComponent(id)}/frame.jpg`,{headers:auth,cache:'no-store'});if(r.status===401){location.href='/';return}if(r.ok){const b=await r.blob(),u=URL.createObjectURL(b);img.src=u;if(oldUrl)URL.revokeObjectURL(oldUrl);oldUrl=u}}catch{}await new Promise(r=>setTimeout(r,700))}if(oldUrl)URL.revokeObjectURL(oldUrl)}
-(async()=>{try{const r=await fetch('/api/minhas-cameras',{headers:auth});if(r.status===401){localStorage.removeItem('contagem_token');location.href='/';return}const data=await r.json();if(!r.ok)throw new Error(data.detail||'Erro');if(!data.length){msg.innerHTML='<div class="empty">Nenhuma camera foi vinculada a este usuario.</div>';return}data.forEach(card)}catch(e){msg.innerHTML='<p class="error">'+e.message+'</p>'}})();
+function card(c){
+ const el=document.createElement('article');el.className='camera';el.dataset.camera=c.id;
+ const img=document.createElement('img');img.alt=c.name;img.loading='eager';
+ const meta=document.createElement('div');meta.className='meta';
+ const row=document.createElement('div');row.className='row';
+ const title=document.createElement('strong');title.textContent=c.name;
+ const status=document.createElement('span');status.className='status '+(c.status==='online'?'online':'offline');status.textContent=c.status.toUpperCase();
+ row.append(title,status);meta.append(row);
+ const id=document.createElement('small');id.textContent=c.id;meta.append(id);
+ const metrics=document.createElement('div');metrics.className='metrics';
+ for (const [key,value] of [['Contados',c.total_contado],['No frame',c.animais_no_frame_agora],['FPS IA',Number(c.fps_ia||0).toFixed(1)]]) {
+   const metric=document.createElement('div');metric.className='metric';
+   const label=document.createElement('small');label.textContent=key;
+   const number=document.createElement('b');number.textContent=String(value);
+   metric.append(label,number);metrics.append(metric);
+ }
+ meta.append(metrics);el.append(img,meta);grid.appendChild(el);runStream(c.id,img);
+}
+async function runStream(id,img){
+ let falhas=0;
+ while(document.body.contains(img)){
+   try{
+     const r=await fetch(`/api/minhas-cameras/${encodeURIComponent(id)}/stream-ticket`,{method:'POST',headers:auth,cache:'no-store'});
+     if(r.status===401){localStorage.removeItem('contagem_token');location.href='/';return}
+     if(!r.ok)throw new Error('Ticket indisponivel');
+     const d=await r.json();
+     const url=`/api/minhas-cameras/${encodeURIComponent(id)}/stream.mjpg?ticket=${encodeURIComponent(d.ticket)}`;
+     await new Promise((resolve,reject)=>{
+       img.onerror=()=>{img.onerror=null;reject(new Error('Stream interrompido'))};
+       img.onload=()=>{falhas=0};
+       img.src=url;
+       // O stream MJPEG nao encerra normalmente; aguarda erro ou saida da pagina.
+       const timer=setInterval(()=>{if(!document.body.contains(img)){clearInterval(timer);img.src='';resolve()}},500);
+       const old=img.onerror;
+       img.onerror=()=>{clearInterval(timer);old&&old();};
+     });
+   }catch(e){falhas=Math.min(falhas+1,5)}
+   if(document.body.contains(img)) await new Promise(r=>setTimeout(r,Math.min(1000*falhas,5000)));
+ }
+}
+(async()=>{try{const r=await fetch('/api/minhas-cameras',{headers:auth});if(r.status===401){localStorage.removeItem('contagem_token');location.href='/';return}const data=await r.json();if(!r.ok)throw new Error(data.detail||'Erro');if(!data.length){msg.innerHTML='<div class="empty">Nenhuma camera foi vinculada a este usuario.</div>';return}data.forEach(card);
+  setInterval(async()=>{
+    try{
+      const resp=await fetch('/api/minhas-cameras',{headers:auth,cache:'no-store'});
+      if(!resp.ok)return;
+      (await resp.json()).forEach(c=>{
+        const el=[...grid.children].find(el=>el.dataset.camera===c.id);
+        if(!el)return;
+        const nums=el.querySelectorAll('.metric b');
+        if(nums[0])nums[0].textContent=c.total_contado;
+        if(nums[1])nums[1].textContent=c.animais_no_frame_agora;
+        if(nums[2])nums[2].textContent=Number(c.fps_ia||0).toFixed(1);
+        const status=el.querySelector('.status');
+        if(status){status.textContent=c.status.toUpperCase();status.className='status '+(c.status==='online'?'online':'offline')}
+      });
+    }catch{}
+  },2500);
+ }catch(e){msg.textContent='Nao foi possivel carregar as cameras.'}})();
 </script></body></html>'''
 
 ADMIN_HTML = r'''<!doctype html>

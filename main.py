@@ -16,6 +16,7 @@ from api import create_app
 from auth import AuthService
 from camera_stream import LatestFrameCamera
 from config import load_config, resolve_project_path, resolve_tracker
+from camera_discovery import discover_and_sync
 from counting import GateCounter
 from evidence import EvidenceRecorder
 from persistence import EventDatabase
@@ -27,6 +28,8 @@ BASE_DIR = Path(__file__).resolve().parent
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sistema de contagem direcional V5 - multi-camera web")
     parser.add_argument("--config", default=str(BASE_DIR / "config.yaml"))
+    parser.add_argument("--no-discovery", action="store_true", help="Usa fontes atuais sem buscar dispositivos")
+    parser.add_argument("--discover-only", action="store_true", help="Atualiza config.yaml e encerra antes de iniciar a API")
     return parser.parse_args()
 
 
@@ -303,35 +306,48 @@ class CameraWorker:
         jpeg_interval = 1.0 / stream_fps
         last_jpeg_at = 0.0
         last_rendered_frame_id = -1
+        last_camera = None
 
         while not self._stop.is_set():
             loop_started = time.perf_counter()
-            frame_id, frame = self._camera.read()
+            camera = self._camera
+            if camera is None or not camera.healthy(3.0):
+                # Sem captura recente, nao reciclar jpeg velho na API.
+                self._stop.wait(0.15)
+                continue
+            if camera is not last_camera:
+                last_camera = camera
+                last_rendered_frame_id = -1
+            frame_id, frame = camera.read()
             if frame is not None and frame_id != last_rendered_frame_id:
                 last_rendered_frame_id = frame_id
                 # O buffer de evidencias acompanha o video, nao o FPS da IA.
-                self._evidence.push(frame)
+                if self._evidence.enabled:
+                    self._evidence.push(frame)
 
                 display = frame.copy()
                 _, roi_box = roi_crop(display, self.camera_cfg["roi"])
                 draw_gate(display, roi_box, self.camera_cfg["gate"])
                 self._draw_visuals(display, self._visuals_for_render())
 
-                self.state.update_metrics(fps_camera=self._camera.fps)
-                window_frame = compose_display(
-                    display.copy(),
-                    self.state.snapshot(),
-                    self.cfg.get("display", {}),
-                )
-                self.frames.update_display(window_frame)
+                self.state.update_metrics(fps_camera=camera.fps)
+                # Quando o programa funciona somente como API, nao montar a
+                # sidebar nem copiar mais uma imagem para uma janela inexistente.
+                show_window = bool(self.cfg["app"].get("show_window", True))
+                include_sidebar = bool(self.cfg.get("api", {}).get("include_sidebar", False))
+                window_frame = None
+                if show_window or include_sidebar:
+                    window_frame = compose_display(
+                        display.copy(),
+                        self.state.snapshot(),
+                        self.cfg.get("display", {}),
+                    )
+                    if show_window:
+                        self.frames.update_display(window_frame)
 
                 now = time.perf_counter()
                 if now - last_jpeg_at >= jpeg_interval:
-                    api_frame = (
-                        window_frame
-                        if bool(self.cfg.get("api", {}).get("include_sidebar", False))
-                        else display
-                    )
+                    api_frame = window_frame if include_sidebar and window_frame is not None else display
                     ok, encoded = cv2.imencode(
                         ".jpg",
                         api_frame,
@@ -361,6 +377,8 @@ class CameraWorker:
                     fps=int(self.camera_cfg.get("fps", 0)) or None,
                     backend=str(self.camera_cfg.get("backend", "auto")),
                     fourcc=str(self.camera_cfg.get("fourcc", "MJPG")),
+                    username_env=self.camera_cfg.get("username_env"),
+                    password_env=self.camera_cfg.get("password_env"),
                 ).start()
             except RuntimeError as exc:
                 tentativa += 1
@@ -435,9 +453,48 @@ class CameraWorker:
                     self._stop.wait(min(0.01, next_inference_at - now))
                     continue
 
+                # Driver USB/DirectShow pode deixar de entregar frames sem soltar
+                # o dispositivo. Evita mostrar uma imagem congelada como "ao vivo".
+                if self._camera.frame_age_seconds() > 4.0:
+                    print(f"[{self.camera_id}] Sem frames novos por 4s. Reconectando dispositivo...")
+                    self.state.update_metrics(
+                        sistema_rodando=False,
+                        animais_no_frame_agora=0,
+                        fps_camera=0.0,
+                        fps_ia=0.0,
+                        ultimo_erro="Sem frames recentes; reconectando webcam",
+                    )
+                    self.frames.clear()
+                    # Ao reconectar, nao reutilizar trilhas da imagem anterior.
+                    with self._runtime_lock:
+                        self.counter.reset()
+                        self.track_visual_status.clear()
+                        self.track_visual_last_seen.clear()
+                    with self._visual_lock:
+                        self._latest_visuals = []
+                        self._latest_visuals_at = 0.0
+                    predictor = getattr(model, "predictor", None)
+                    for active_tracker in getattr(predictor, "trackers", []) or []:
+                        try:
+                            active_tracker.reset()
+                        except Exception:
+                            pass
+                    self._camera.stop()
+                    self._camera = None
+                    self._camera = self._abrir_camera_com_retentativa()
+                    if self._camera is None:
+                        return
+                    self.state.update_metrics(
+                        sistema_rodando=True,
+                        ultimo_erro=None,
+                        resolucao_camera=f"{self._camera.actual_width}x{self._camera.actual_height}",
+                    )
+                    last_inference_frame_id = -1
+                    continue
+
                 frame_id, frame = self._camera.read()
                 if frame is None or frame_id == last_inference_frame_id:
-                    time.sleep(0.002)
+                    self._stop.wait(0.01)
                     continue
 
                 last_inference_frame_id = frame_id
@@ -571,6 +628,7 @@ class CameraWorker:
                 )
 
         except Exception as exc:
+            self.frames.clear()
             self.state.update_metrics(
                 sistema_rodando=False,
                 animais_no_frame_agora=0,
@@ -579,6 +637,7 @@ class CameraWorker:
             print(f"[{self.camera_id}] ERRO: {type(exc).__name__}: {exc}")
         finally:
             self._stop.set()
+            self.frames.clear()
             self.state.update_metrics(sistema_rodando=False, animais_no_frame_agora=0)
             if self._render_thread and self._render_thread.is_alive():
                 self._render_thread.join(timeout=2.0)
@@ -592,6 +651,21 @@ class CameraWorker:
 def main() -> int:
     load_dotenv(BASE_DIR / ".env")
     args = parse_args()
+    # Busca ANTES de iniciar workers, para nao disputar webcams ja abertas.
+    # Em caso de erro inesperado, mantem o YAML existente.
+    if not args.no_discovery:
+        try:
+            with Path(args.config).open("r", encoding="utf-8") as fh:
+                import yaml
+                discovery_enabled = (yaml.safe_load(fh) or {}).get("discovery", {}).get("enabled", True)
+            if discovery_enabled:
+                discover_and_sync(args.config)
+        except Exception as exc:
+            print(f"[descoberta] Nao foi possivel atualizar config.yaml: {exc}")
+            if args.discover_only:
+                return 1
+    if args.discover_only:
+        return 0
     cfg = load_config(args.config)
 
     rebano_api_url = os.getenv("REBANO_API_URL", "http://localhost:5148").rstrip("/")
@@ -650,6 +724,8 @@ def main() -> int:
             host=str(cfg["app"]["host"]),
             port=int(cfg["app"]["port"]),
             log_level="info",
+            # Evita centenas de logs por minuto nas consultas JPEG do Rebano.
+            access_log=False,
         )
     )
     api_thread = threading.Thread(target=server.run, name="api-server", daemon=True)
@@ -673,7 +749,9 @@ def main() -> int:
     for worker in workers:
         print(f"  - {worker.camera_id}: {worker.camera_name} (source={worker.camera_cfg['source']})")
     if cfg["app"].get("show_window", True):
-        print("Pressione Q em qualquer janela para encerrar todas as cameras.")
+        print("Janelas locais habilitadas. Clique numa janela e pressione Q para encerrar TODO o ContagemSys.")
+    if not workers:
+        print("Nenhuma camera disponivel. A API continua ativa, aguardando o proximo inicio com fontes validas.")
 
     last_display_versions = {worker.camera_id: -1 for worker in workers}
 

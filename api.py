@@ -106,10 +106,13 @@ def create_app(
     def camera_summary(camera_id: str, ctx: CameraApiContext) -> dict[str, Any]:
         snap = ctx["state"].snapshot()
         owner = db.get_camera_owner(camera_id)
+        frame_store: LiveFrameStore = ctx["frames"]
+        # Um estado online exige tanto o worker quanto quadros disponiveis.
+        _, ultimo_jpeg = frame_store.recent_jpeg()
         return {
             "id": camera_id,
             "name": snap["camera_name"],
-            "status": "online" if snap["sistema_rodando"] else "offline",
+            "status": "online" if snap["sistema_rodando"] and ultimo_jpeg is not None else "offline",
             "total_contado": snap["total_contado"],
             "animais_no_frame_agora": snap["animais_no_frame_agora"],
             "retornos_esquerda_para_direita": snap["retornos_esquerda_para_direita"],
@@ -118,6 +121,8 @@ def create_app(
             "latencia_ia_ms": snap["latencia_ia_ms"],
             "session_id": snap["session_id"],
             "ultimo_erro": snap.get("ultimo_erro"),
+            "resolucao_camera": snap.get("resolucao_camera"),
+            "espera_fila_ia_ms": snap.get("espera_fila_ia_ms"),
             "usuario_id": int(owner["usuario_id"]) if owner else None,
             "usuario_nome": owner["usuario_nome"] if owner else None,
             "usuario_email": owner["usuario_email"] if owner else None,
@@ -133,7 +138,7 @@ def create_app(
 
     def jpeg_response(camera: CameraApiContext) -> Response:
         frame_store: LiveFrameStore = camera["frames"]
-        _, jpeg = frame_store.jpeg()
+        _, jpeg = frame_store.recent_jpeg()
         if jpeg is None:
             raise HTTPException(status_code=503, detail="Frame ainda nao disponivel")
         return Response(
@@ -142,16 +147,27 @@ def create_app(
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
-    def mjpeg_response(camera: CameraApiContext) -> StreamingResponse:
+    def mjpeg_response(
+        camera: CameraApiContext,
+        allowed: Callable[[], bool] | None = None,
+    ) -> StreamingResponse:
         frame_store: LiveFrameStore = camera["frames"]
         delay = 1.0 / max(1, min(int(stream_fps), 30))
 
         async def generate():
             last_version = -1
+            last_image_at = asyncio.get_running_loop().time()
+            last_auth_check = 0.0
             while True:
-                version, jpeg = frame_store.jpeg()
+                now = asyncio.get_running_loop().time()
+                if allowed and now - last_auth_check >= 2.0:
+                    if not allowed():
+                        break  # ao retirar o vinculo, o stream existente encerra
+                    last_auth_check = now
+                version, jpeg = frame_store.recent_jpeg()
                 if jpeg is not None and version != last_version:
                     last_version = version
+                    last_image_at = now
                     yield (
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n"
@@ -159,13 +175,28 @@ def create_app(
                         + jpeg
                         + b"\r\n"
                     )
+                if now - last_image_at > 5.0:
+                    break  # sem video novo: forcar reconexao do navegador
                 await asyncio.sleep(delay)
 
         return StreamingResponse(
             generate(),
             media_type="multipart/x-mixed-replace; boundary=frame",
-            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                "X-Accel-Buffering": "no",
+            },
         )
+
+    def camera_details(camera_id: str, ctx: CameraApiContext, offset: int) -> dict[str, Any]:
+        return {
+            "camera": camera_summary(camera_id, ctx),
+            "estatisticas": db.camera_statistics(camera_id, tz_offset_minutes=offset),
+            "eventos": [
+                {field: evento[field] for field in ("id", "timestamp", "counted", "track_id", "confidence", "direction")}
+                for evento in db.list_events(camera_id=camera_id, limit=30)
+            ],
+        }
 
     # -------------------- Interface web --------------------
 
@@ -220,12 +251,31 @@ def create_app(
     ) -> Response:
         return jpeg_response(require_owner(camera_id, user["usuario_id"]))
 
+    @app.post("/api/minhas-cameras/{camera_id}/stream-ticket")
+    def my_stream_ticket(camera_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, str]:
+        require_owner(camera_id, user["usuario_id"])
+        return {"ticket": auth_service.issue_stream_ticket(user["usuario_id"], camera_id)}
+
     @app.get("/api/minhas-cameras/{camera_id}/stream.mjpg")
     def my_camera_stream(
         camera_id: str,
-        user: dict[str, Any] = Depends(require_user),
+        ticket: str | None = None,
+        credentials: HTTPAuthorizationCredentials | None = Security(bearer),
     ) -> StreamingResponse:
-        return mjpeg_response(require_owner(camera_id, user["usuario_id"]))
+        if ticket:
+            try:
+                claim = auth_service.decode_token(ticket)
+                if claim.get("role") != "stream" or claim.get("camera_id") != camera_id:
+                    raise AuthenticationError("Ticket sem permissao para esta camera")
+                usuario_id = int(claim["sub"])
+            except (AuthenticationError, ValueError, TypeError, KeyError) as exc:
+                raise HTTPException(status_code=401, detail="Ticket de stream invalido") from exc
+        else:
+            usuario_id = require_user(credentials)["usuario_id"]
+        return mjpeg_response(
+            require_owner(camera_id, usuario_id),
+            allowed=lambda: int((db.get_camera_owner(camera_id) or {}).get("usuario_id", -1)) == usuario_id,
+        )
 
     @app.get("/api/minhas-cameras/{camera_id}/eventos")
     def my_camera_events(
@@ -235,6 +285,14 @@ def create_app(
     ) -> list[dict[str, Any]]:
         require_owner(camera_id, user["usuario_id"])
         return db.list_events(limit=limit, camera_id=camera_id)
+
+    @app.get("/api/minhas-cameras/{camera_id}/detalhes")
+    def my_camera_details(
+        camera_id: str,
+        offset_minutos: int = Query(default=-180, ge=-720, le=840),
+        user: dict[str, Any] = Depends(require_user),
+    ) -> dict[str, Any]:
+        return camera_details(camera_id, require_owner(camera_id, user["usuario_id"]), offset_minutos)
 
     # -------------------- Administracao dos vinculos --------------------
 
@@ -293,7 +351,10 @@ def create_app(
         dependencies=[Depends(require_integration_key)],
     )
     def integration_stream(usuario_id: int, camera_id: str) -> StreamingResponse:
-        return mjpeg_response(require_owner(camera_id, usuario_id))
+        return mjpeg_response(
+            require_owner(camera_id, usuario_id),
+            allowed=lambda: int((db.get_camera_owner(camera_id) or {}).get("usuario_id", -1)) == usuario_id,
+        )
 
     @app.get(
         "/api/integracao/usuarios/{usuario_id}/cameras/{camera_id}/eventos",
@@ -306,6 +367,17 @@ def create_app(
     ) -> list[dict[str, Any]]:
         require_owner(camera_id, usuario_id)
         return db.list_events(limit=limit, camera_id=camera_id)
+
+    @app.get(
+        "/api/integracao/usuarios/{usuario_id}/cameras/{camera_id}/detalhes",
+        dependencies=[Depends(require_integration_key)],
+    )
+    def integration_details(
+        usuario_id: int,
+        camera_id: str,
+        offset_minutos: int = Query(default=-180, ge=-720, le=840),
+    ) -> dict[str, Any]:
+        return camera_details(camera_id, require_owner(camera_id, usuario_id), offset_minutos)
 
     # -------------------- Diagnostico --------------------
 

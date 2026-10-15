@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -14,10 +15,20 @@ class EventDatabase:
         self._lock = RLock()
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
+        """Transacao SQLite que sempre libera a conexao, inclusive em erro.
+
+        `with sqlite3.connect()` sozinho apenas confirma a transacao:
+        ele NAO fecha a conexao do banco.
+        """
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     @staticmethod
     def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -190,6 +201,39 @@ class EventDatabase:
                 ).fetchall()
         return [dict(row) for row in rows]
 
+
+    def camera_statistics(self, camera_id: str, tz_offset_minutes: int = -180) -> dict[str, Any]:
+        """Total historico/today obtido dos eventos persistidos (UTC no SQLite).
+
+        A data de hoje e definida pelo fuso horario informado pelo navegador,
+        sem misturar contagem da sessao atual com historico permanente.
+        """
+        tz = timezone(timedelta(minutes=tz_offset_minutes))
+        agora = datetime.now(tz)
+        inicio_local = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+        inicio_utc = inicio_local.astimezone(timezone.utc).isoformat()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """SELECT
+                    COALESCE(SUM(CASE WHEN counted=1 THEN 1 ELSE 0 END),0) AS total_historico,
+                    COALESCE(SUM(CASE WHEN counted=0 THEN 1 ELSE 0 END),0) AS total_retornos,
+                    COALESCE(SUM(CASE WHEN counted=1 AND timestamp >= ? THEN 1 ELSE 0 END),0) AS total_hoje,
+                    MIN(CASE WHEN counted=1 THEN timestamp END) AS primeiro_registro,
+                    MAX(CASE WHEN counted=1 THEN timestamp END) AS ultimo_registro
+                FROM events WHERE camera_id=?""",
+                (inicio_utc, camera_id),
+            ).fetchone()
+            sessao = conn.execute(
+                "SELECT id, started_at FROM sessions WHERE camera_id=? ORDER BY id DESC LIMIT 1",
+                (camera_id,),
+            ).fetchone()
+        return {
+            **dict(row),
+            "data_local": agora.date().isoformat(),
+            "fuso_minutos": tz_offset_minutes,
+            "sessao_iniciada_em": sessao["started_at"] if sessao else None,
+            "sessao_id": sessao["id"] if sessao else None,
+        }
 
     def set_camera_owner(
         self,

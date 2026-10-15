@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from threading import RLock
+import time
 from typing import Any
 
 
@@ -68,6 +69,7 @@ class LiveFrameStore:
         self._lock = RLock()
         self._jpeg: bytes | None = None
         self._display: Any | None = None
+        self._last_jpeg_at = 0.0
         self._version = 0
         self._display_version = 0
 
@@ -79,7 +81,23 @@ class LiveFrameStore:
     def update_jpeg(self, jpeg_bytes: bytes) -> None:
         with self._lock:
             self._jpeg = bytes(jpeg_bytes)
+            self._last_jpeg_at = time.monotonic()
             self._version += 1
+
+    def clear(self) -> None:
+        """Remove os quadros antigos para nao exibir webcam desconectada como online."""
+        with self._lock:
+            self._jpeg = None
+            self._last_jpeg_at = 0.0
+            self._display = None
+            self._version += 1
+            self._display_version += 1
+
+    def recent_jpeg(self, max_age_seconds: float = 3.0) -> tuple[int, bytes | None]:
+        with self._lock:
+            if not self._last_jpeg_at or time.monotonic() - self._last_jpeg_at > max_age_seconds:
+                return self._version, None
+            return self._version, self._jpeg
 
     def jpeg(self) -> tuple[int, bytes | None]:
         with self._lock:

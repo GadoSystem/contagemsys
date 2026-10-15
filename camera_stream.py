@@ -1,11 +1,74 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import quote, urlsplit, urlunsplit
 import time
 from threading import Event, Lock, Thread
 from typing import Any
 
 import cv2
+
+
+def resolve_video_source(source: Any, username_env: str | None = None,
+                         password_env: str | None = None) -> Any:
+    """Expande URL por variaveis de ambiente; credenciais ficam fora do YAML."""
+    if not isinstance(source, str):
+        return source
+    value = os.path.expandvars(source)
+    if value.isdigit():
+        return int(value)
+    if username_env or password_env:
+        user = os.getenv(str(username_env), "") if username_env else ""
+        password = os.getenv(str(password_env), "") if password_env else ""
+        if user:
+            parsed = urlsplit(value)
+            if parsed.scheme in ("rtsp", "rtsps", "http", "https") and parsed.hostname:
+                host = parsed.hostname
+                if ":" in host:
+                    host = f"[{host}]"
+                netloc = f"{quote(user, safe='')}:{quote(password, safe='')}@{host}"
+                if parsed.port:
+                    netloc += f":{parsed.port}"
+                return urlunsplit(parsed._replace(netloc=netloc))
+    return value
+
+
+def open_video_source(source: Any, *, backend: str = "auto", width: int | None = None,
+                      height: int | None = None, fps: int | None = None,
+                      fourcc: str = "MJPG", open_timeout_ms: int = 2500,
+                      read_timeout_ms: int = 2500):
+    """Abre webcam / RTSP / HTTP. Falha retorna None, nunca reutiliza frames."""
+    is_index = isinstance(source, int)
+    backend = str(backend).lower()
+    codes = {"dshow": cv2.CAP_DSHOW, "msmf": cv2.CAP_MSMF,
+             "ffmpeg": cv2.CAP_FFMPEG, "gstreamer": cv2.CAP_GSTREAMER}
+    code = codes.get(backend)
+    if not is_index and backend in ("auto", "default", "dshow", "msmf"):
+        code = cv2.CAP_FFMPEG
+    if code is not None and not is_index:
+        try:
+            cap = cv2.VideoCapture(source, code, [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(open_timeout_ms),
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(read_timeout_ms),
+            ])
+        except (TypeError, cv2.error):
+            cap = cv2.VideoCapture(source, code)
+    else:
+        cap = cv2.VideoCapture(source, code) if code is not None else cv2.VideoCapture(source)
+    if not cap.isOpened():
+        cap.release()
+        return None
+    if is_index:
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        if fps:
+            cap.set(cv2.CAP_PROP_FPS, int(fps))
+        if fourcc and len(fourcc) == 4:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
 
 
 class LatestFrameCamera:
@@ -23,8 +86,12 @@ class LatestFrameCamera:
         fps: int | None = None,
         backend: str = "auto",
         fourcc: str | None = "MJPG",
+        username_env: str | None = None,
+        password_env: str | None = None,
     ) -> None:
         self.source = source
+        self.username_env = username_env
+        self.password_env = password_env
         self.width = width
         self.height = height
         self.requested_fps = fps
@@ -37,6 +104,7 @@ class LatestFrameCamera:
         self._stop = Event()
         self._thread: Thread | None = None
         self._fps = 0.0
+        self._last_frame_at = 0.0
         self._actual_width = 0
         self._actual_height = 0
         self._actual_capture_fps = 0.0
@@ -56,6 +124,15 @@ class LatestFrameCamera:
     @property
     def actual_capture_fps(self) -> float:
         return self._actual_capture_fps
+
+    def frame_age_seconds(self) -> float:
+        """Idade do ultimo frame entregue pelo dispositivo, nao do frame renderizado."""
+        with self._lock:
+            instante = self._last_frame_at
+        return time.monotonic() - instante if instante else float("inf")
+
+    def healthy(self, max_age_seconds: float = 3.0) -> bool:
+        return self.frame_age_seconds() < max_age_seconds
 
     def _open_candidates(self, source: Any) -> list[tuple[str, int | None]]:
         if not isinstance(source, int):
@@ -96,21 +173,17 @@ class LatestFrameCamera:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def start(self) -> "LatestFrameCamera":
-        source = int(self.source) if isinstance(self.source, str) and self.source.isdigit() else self.source
+        source = resolve_video_source(self.source, self.username_env, self.password_env)
         errors: list[str] = []
 
         for backend_name, backend_code in self._open_candidates(source):
-            cap = (
-                cv2.VideoCapture(source, backend_code)
-                if backend_code is not None
-                else cv2.VideoCapture(source)
+            cap = open_video_source(
+                source, backend=backend_name, width=self.width, height=self.height,
+                fps=self.requested_fps, fourcc=self.fourcc,
             )
-            if not cap.isOpened():
+            if cap is None:
                 errors.append(backend_name)
-                cap.release()
                 continue
-
-            self._configure_capture(cap)
             ok, frame = cap.read()
             if not ok or frame is None:
                 errors.append(f"{backend_name}:sem-frame")
@@ -121,12 +194,15 @@ class LatestFrameCamera:
             with self._lock:
                 self._frame = frame
                 self._frame_id = 1
+                self._last_frame_at = time.monotonic()
             break
 
         if self.cap is None:
             attempted = ", ".join(errors) if errors else "backend padrao"
+            # Nao incluir senha de RTSP/HTTP em logs.
+            origem = f"indice {source}" if isinstance(source, int) else "stream de rede"
             raise RuntimeError(
-                f"Nao foi possivel abrir a fonte de video: {self.source}. Tentativas: {attempted}"
+                f"Nao foi possivel abrir a fonte ({origem}). Tentativas: {attempted}"
             )
 
         self._actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
@@ -143,12 +219,15 @@ class LatestFrameCamera:
         mark = time.perf_counter()
         while not self._stop.is_set() and self.cap is not None:
             ok, frame = self.cap.read()
-            if not ok:
-                time.sleep(0.005)
+            if not ok or frame is None:
+                if self.frame_age_seconds() >= 1.5:
+                    self._fps = 0.0
+                self._stop.wait(0.05)
                 continue
             with self._lock:
                 self._frame = frame
                 self._frame_id += 1
+                self._last_frame_at = time.monotonic()
             frames += 1
             now = time.perf_counter()
             dt = now - mark
