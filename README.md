@@ -49,9 +49,10 @@ Webcam USB / câmera integrada / Iriun / câmera IP
 
 1. O Rebano cadastra e autentica os usuários.
 2. O administrador do ContagemSys abre `/admin` e vincula cada câmera a um usuário do Rebano.
-3. O ContagemSys autentica o usuário com as credenciais do Rebano.
-4. O backend do Rebano consulta as câmeras autorizadas e disponibiliza os dados e o vídeo ao usuário logado.
-5. Cada câmera é consultada pelo identificador (`camera_1`, `camera_2`, etc.). Se a ordem física dos dispositivos mudar, confira os vínculos no painel administrativo.
+3. O ContagemSys autentica o usuário com **CPF e senha** da conta do Rebano: o CPF é validado (11 dígitos, com ou sem máscara) e enviado ao `POST /api/auth/login` do Rebano, que verifica a senha. O banco do Rebano não é acessado pelo ContagemSys.
+4. No login, o ContagemSys guarda **somente em memória do servidor** o token do Rebano daquele usuário e consulta `GET /Fazenda/ObterTodos` e `GET /Fazenda/{id}/Cameras` para agrupar o painel por fazenda (detalhes na seção 8.1).
+5. O backend do Rebano consulta as câmeras autorizadas e disponibiliza os dados e o vídeo ao usuário logado.
+6. Cada câmera é consultada pelo identificador (`camera_1`, `camera_2`, etc.). Se a ordem física dos dispositivos mudar, confira os vínculos no painel administrativo.
 
 **Importante:** nesta arquitetura, as webcams locais são capturadas pelo computador que executa o ContagemSys. Ter uma câmera USB conectada em outro computador não faz com que ela apareça automaticamente no servidor remoto; isso exigiria um agente de captura/encaminhamento naquele computador ou uma fonte de rede acessível.
 
@@ -100,6 +101,8 @@ contagemsys/
 ├── listar_cameras.py        # Diagnóstico das fontes de vídeo
 ├── counting.py              # Lógica de contagem
 ├── persistence.py           # Eventos e armazenamento SQLite
+├── web_ui.py                # HTML das páginas de login, painel e admin
+├── static/                  # CSS, JavaScript e logo do painel (sem CDN)
 ├── config.yaml              # Câmeras, IA, streaming e desempenho
 ├── .env                     # Endereços e segredos (não publicar)
 ├── .env.example             # Modelo de configuração
@@ -182,7 +185,7 @@ Esse trecho é parte de um JSON maior: **não substitua o arquivo inteiro**. A c
 | Serviço | Endereço padrão |
 | --- | --- |
 | Login ContagemSys | `http://localhost:8000/` |
-| Painel do usuário ContagemSys | `http://localhost:8000/painel` |
+| Painel do usuário ContagemSys (câmeras por fazenda, grade ao vivo, visão ampliada com métricas) | `http://localhost:8000/painel` |
 | Administração ContagemSys | `http://localhost:8000/admin` |
 | Swagger ContagemSys | `http://localhost:8000/docs` |
 | Saúde ContagemSys | `http://localhost:8000/health` |
@@ -192,6 +195,15 @@ Esse trecho é parte de um JSON maior: **não substitua o arquivo inteiro**. A c
 | Câmeras no Rebano | `http://localhost:5173/Cameras` |
 
 A porta do frontend é **5173 quando iniciado conforme o LEIA-ME.txt**. O comando `npm run dev` sem parâmetro usa a porta **80** definida no `package.json` atual.
+
+### 8.1. Painel do usuário e agrupamento por fazenda
+
+- **Arquivos:** o HTML fica em `web_ui.py`; estilos, scripts e logo ficam em `static/` (`app.css`, `login.js`, `painel.js`, `logo-rebano.svg`), servidos pelo FastAPI em `/static`. Nada é carregado da internet (sem CDN nem fontes externas).
+- **Grade:** cada bloco atualiza a imagem a partir do `frame.jpg` já produzido pelo worker (cerca de 1 quadro/s). O MJPEG completo só é aberto na visão ampliada, uma conexão por vez. Nenhuma captura extra é criada no servidor.
+- **Tela cheia:** botão no cabeçalho (Fullscreen API). Na visão ampliada, **Esc** volta à grade e **← / →** trocam de câmera.
+- **Fazendas:** uma câmera do ContagemSys aparece na fazenda cujo cadastro de câmera no Rebano tem **Identificação igual ao id da câmera** (`camera_1`, `camera_2`... — sem diferenciar maiúsculas/minúsculas). Câmeras autorizadas sem correspondência vão para **"Outras câmeras"**; fazendas sem câmeras não aparecem. A autorização continua sendo o vínculo do `/admin`: o Rebano só define o agrupamento.
+- **Como cadastrar no Rebano:** no frontend do Rebano, abra a fazenda e cadastre a câmera (ou use `POST /Camera/Criar`) com `identificacao` igual ao id mostrado em `/admin` (ex.: `camera_1`) e `fazendaId` da fazenda desejada. A fazenda precisa estar vinculada ao usuário que fará login.
+- Se o ContagemSys for reiniciado, o token do Rebano em memória se perde: o painel continua funcionando, mostra todas as câmeras em "Outras câmeras" e avisa para sair e entrar novamente.
 
 ## 9. Testes, limitações e segurança
 

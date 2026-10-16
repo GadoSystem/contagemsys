@@ -9,9 +9,10 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Security
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from auth import AuthService, AuthenticationError, IntegrationError
+from auth import AuthService, AuthenticationError, IntegrationError, LoginInputError
 from persistence import EventDatabase
 from state import LiveFrameStore
 from web_ui import ADMIN_HTML, LOGIN_HTML, PANEL_HTML
@@ -19,10 +20,41 @@ from web_ui import ADMIN_HTML, LOGIN_HTML, PANEL_HTML
 
 CameraApiContext = dict[str, Any]
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+OUTRAS_CAMERAS = "Outras câmeras"
+
+
+def agrupar_por_fazenda(
+    cameras: list[dict[str, Any]],
+    mapa: dict[str, dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Agrupa as cameras ja autorizadas pela fazenda correspondente no Rebano.
+
+    A camera pertence a fazenda cuja Camera.Identificacao (Rebano) e igual ao id
+    da camera no ContagemSys. Sem correspondencia, vai para "Outras câmeras".
+    Fazendas sem cameras autorizadas nao aparecem.
+    """
+    grupos: dict[int, dict[str, Any]] = {}
+    outras: list[dict[str, Any]] = []
+    for camera in cameras:
+        fazenda = (mapa or {}).get(str(camera["id"]).strip().casefold())
+        if fazenda is None:
+            outras.append(camera)
+            continue
+        grupo = grupos.setdefault(
+            int(fazenda["id"]), {"id": int(fazenda["id"]), "nome": fazenda["nome"], "cameras": []}
+        )
+        grupo["cameras"].append(camera)
+    resultado = sorted(grupos.values(), key=lambda g: str(g["nome"]).casefold())
+    if outras:
+        resultado.append({"id": None, "nome": OUTRAS_CAMERAS, "cameras": outras})
+    return resultado
+
 
 class LoginRequest(BaseModel):
-    login: str
-    senha: str
+    # Padrao vazio: campo ausente recebe a mesma mensagem clara de campo vazio.
+    cpf: str = ""
+    senha: str = ""
 
 
 class AdminLoginRequest(BaseModel):
@@ -55,6 +87,7 @@ def create_app(
     )
 
     bearer = HTTPBearer(auto_error=False)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     def _decode_token(credentials: HTTPAuthorizationCredentials | None) -> dict[str, Any]:
         if credentials is None or credentials.scheme.lower() != "bearer":
@@ -217,7 +250,9 @@ def create_app(
     @app.post("/api/auth/login")
     async def user_login(body: LoginRequest) -> dict[str, Any]:
         try:
-            return await auth_service.login_user(body.login, body.senha)
+            return await auth_service.login_user(body.cpf, body.senha)
+        except LoginInputError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except AuthenticationError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         except IntegrationError as exc:
@@ -235,6 +270,15 @@ def create_app(
     @app.get("/api/minhas-cameras")
     def my_cameras(user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
         return cameras_for_user(user["usuario_id"])
+
+    @app.get("/api/minhas-fazendas")
+    async def my_farms(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        # O usuario vem somente do token; as cameras sao as do vinculo atual.
+        mapa = await auth_service.fazendas_das_cameras(user["usuario_id"])
+        return {
+            "fazendas_sincronizadas": mapa is not None,
+            "grupos": agrupar_por_fazenda(cameras_for_user(user["usuario_id"]), mapa),
+        }
 
     @app.get("/api/minhas-cameras/{camera_id}/contagem")
     def my_camera_count(

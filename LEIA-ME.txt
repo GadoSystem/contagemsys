@@ -262,8 +262,19 @@ URL RTSP/HTTP em discovery.ip_streams e, quando necessário, credenciais.
 9.1. Abra http://localhost:8000/admin.
 9.2. Entre com CONTAGEM_ADMIN_USER e CONTAGEM_ADMIN_PASSWORD do .env.
 9.3. Associe cada câmera ativa ao usuário correspondente e salve.
-9.4. Acesse http://localhost:8000 e entre com a conta do Rebano.
-9.5. Confira as câmeras vinculadas em http://localhost:8000/painel.
+9.4. Acesse http://localhost:8000 e entre com o CPF e a senha da conta
+     do Rebano (CPF com ou sem máscara). A senha é verificada pelo Rebano,
+     que precisa estar rodando.
+9.5. Confira as câmeras vinculadas em http://localhost:8000/painel:
+     as câmeras aparecem em grade, separadas por fazenda (abas no topo).
+     Clique em uma câmera para abrir o vídeo ampliado com as métricas e o
+     JSON (Esc volta). O botão "Tela cheia" é indicado para TV/projetor.
+     Use "Sair" para encerrar a sessão.
+9.6. Para agrupar por fazenda, cadastre no Rebano (tela da fazenda ou
+     POST /Camera/Criar) uma câmera com Identificação IGUAL ao id do
+     ContagemSys (ex.: camera_1) na fazenda desejada. Sem esse cadastro
+     a câmera aparece em "Outras câmeras". Depois de cadastrar, aguarde
+     até 1 minuto ou saia e entre novamente no painel.
 
 Cada usuário deve acessar somente as câmeras associadas ao seu ID no
 Rebano. Revise os vínculos depois de alterar dispositivos ou índices.

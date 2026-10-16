@@ -1,88 +1,163 @@
 from __future__ import annotations
 
+# Login e painel do usuario: HTML aqui; estilos, scripts e logo em static/
+# (servidos pelo proprio FastAPI, sem CDN nem fontes externas).
+
 LOGIN_HTML = r'''<!doctype html>
 <html lang="pt-BR">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ContagemSys - Login</title>
-<style>
-*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#0f1714;color:#ecf5f0;min-height:100vh;display:grid;place-items:center}.card{width:min(420px,92vw);background:#17231e;border:1px solid #2d4037;border-radius:16px;padding:28px;box-shadow:0 18px 50px #0007}h1{margin:0 0 8px;font-size:25px}p{color:#a9bbb2}.field{display:block;margin:16px 0}.field span{display:block;margin-bottom:6px;font-size:12px;color:#b6c7be;font-weight:700}.field input{width:100%;padding:12px;border:1px solid #3b5146;border-radius:9px;background:#0f1714;color:white}button{width:100%;padding:12px;border:0;border-radius:9px;background:#2b9b62;color:white;font-weight:700;cursor:pointer}.error{min-height:22px;color:#ff8585;margin-top:12px}.links{margin-top:18px;text-align:center}.links a{color:#85d8ad;text-decoration:none;font-size:13px}
-</style></head>
-<body><main class="card"><h1>ContagemSys</h1><p>Use o mesmo login do Rebano.</p><form id="form"><label class="field"><span>E-MAIL / CPF / TELEFONE</span><input id="login" required></label><label class="field"><span>SENHA</span><input id="senha" type="password" required></label><button>Entrar</button><div class="error" id="erro"></div></form><div class="links"><a href="/admin">Acesso do administrador</a></div></main>
-<script>
-const form=document.querySelector('#form'),erro=document.querySelector('#erro'),loginInput=document.querySelector('#login'),senhaInput=document.querySelector('#senha');
-form.addEventListener('submit',async e=>{e.preventDefault();erro.textContent='';try{const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({login:loginInput.value,senha:senhaInput.value})});const data=await r.json();if(!r.ok)throw new Error(data.detail||'Falha no login');localStorage.setItem('contagem_token',data.token);localStorage.setItem('contagem_usuario',JSON.stringify(data.usuario));location.href='/painel';}catch(ex){erro.textContent=ex.message}})
-</script></body></html>'''
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#07100c">
+<title>Entrar · ContagemSys</title>
+<link rel="icon" href="/static/logo-rebano.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-page">
+<main class="login-card">
+  <div class="login-brand">
+    <img src="/static/logo-rebano.svg" alt="Rebano" width="68" height="68">
+    <div><h1>ContagemSys</h1><p>Monitoramento de rebanhos · Rebano</p></div>
+  </div>
+  <p class="login-intro">Entre com o CPF e a senha da sua conta do Rebano.</p>
+  <form id="form" novalidate>
+    <label class="field" for="cpf">
+      <span class="field-label">CPF</span>
+      <input class="field-input tabular" id="cpf" name="cpf" inputmode="numeric" autocomplete="username"
+             placeholder="000.000.000-00" maxlength="14" aria-describedby="alerta">
+    </label>
+    <label class="field" for="senha">
+      <span class="field-label">Senha</span>
+      <span class="password-wrap">
+        <input class="field-input" id="senha" name="senha" type="password" autocomplete="current-password" aria-describedby="alerta">
+        <button class="btn btn-ghost btn-icon password-toggle" id="toggleSenha" type="button" aria-label="Mostrar senha" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </span>
+    </label>
+    <button class="btn btn-primary login-submit" id="entrar" type="submit">Entrar</button>
+    <div class="login-alert hidden" id="alerta" role="alert" aria-live="assertive"></div>
+  </form>
+  <div class="login-foot"><span>A senha é verificada pelo Rebano.</span><a href="/admin">Administração</a></div>
+</main>
+<script src="/static/login.js"></script>
+</body>
+</html>'''
 
 PANEL_HTML = r'''<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Minhas cameras - ContagemSys</title>
-<style>
-*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#0d1512;color:#edf5f1}.top{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;background:#14201b;border-bottom:1px solid #2a3a32}.top button{background:#25372f;color:white;border:1px solid #3b5146;border-radius:8px;padding:9px 12px;cursor:pointer}.wrap{max-width:1250px;margin:auto;padding:24px}h1{font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}.camera{background:#15211c;border:1px solid #2d4037;border-radius:14px;overflow:hidden}.camera img{width:100%;aspect-ratio:16/9;object-fit:cover;background:#050706;display:block}.meta{padding:14px}.row{display:flex;justify-content:space-between;gap:12px}.status{font-size:12px;font-weight:700}.online{color:#63d89b}.offline{color:#f48b8b}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}.metric{background:#0e1713;border-radius:8px;padding:8px}.metric small{display:block;color:#91a59a}.empty{padding:30px;border:1px dashed #40564b;border-radius:12px;color:#a9bbb2}.error{color:#ff8585}
-</style></head><body><header class="top"><strong>ContagemSys</strong><div><span id="user"></span> <button id="logout">Sair</button></div></header><main class="wrap"><h1>Minhas cameras</h1><div id="message"></div><section class="grid" id="grid"></section></main>
-<script>
-const token=localStorage.getItem('contagem_token');if(!token)location.href='/';
-try{const u=JSON.parse(localStorage.getItem('contagem_usuario')||'{}');document.querySelector('#user').textContent=u.nome||''}catch{}
-document.querySelector('#logout').onclick=()=>{localStorage.removeItem('contagem_token');localStorage.removeItem('contagem_usuario');location.href='/'};
-const auth={'Authorization':'Bearer '+token};const grid=document.querySelector('#grid'),msg=document.querySelector('#message');
-function card(c){
- const el=document.createElement('article');el.className='camera';el.dataset.camera=c.id;
- const img=document.createElement('img');img.alt=c.name;img.loading='eager';
- const meta=document.createElement('div');meta.className='meta';
- const row=document.createElement('div');row.className='row';
- const title=document.createElement('strong');title.textContent=c.name;
- const status=document.createElement('span');status.className='status '+(c.status==='online'?'online':'offline');status.textContent=c.status.toUpperCase();
- row.append(title,status);meta.append(row);
- const id=document.createElement('small');id.textContent=c.id;meta.append(id);
- const metrics=document.createElement('div');metrics.className='metrics';
- for (const [key,value] of [['Contados',c.total_contado],['No frame',c.animais_no_frame_agora],['FPS IA',Number(c.fps_ia||0).toFixed(1)]]) {
-   const metric=document.createElement('div');metric.className='metric';
-   const label=document.createElement('small');label.textContent=key;
-   const number=document.createElement('b');number.textContent=String(value);
-   metric.append(label,number);metrics.append(metric);
- }
- meta.append(metrics);el.append(img,meta);grid.appendChild(el);runStream(c.id,img);
-}
-async function runStream(id,img){
- let falhas=0;
- while(document.body.contains(img)){
-   try{
-     const r=await fetch(`/api/minhas-cameras/${encodeURIComponent(id)}/stream-ticket`,{method:'POST',headers:auth,cache:'no-store'});
-     if(r.status===401){localStorage.removeItem('contagem_token');location.href='/';return}
-     if(!r.ok)throw new Error('Ticket indisponivel');
-     const d=await r.json();
-     const url=`/api/minhas-cameras/${encodeURIComponent(id)}/stream.mjpg?ticket=${encodeURIComponent(d.ticket)}`;
-     await new Promise((resolve,reject)=>{
-       img.onerror=()=>{img.onerror=null;reject(new Error('Stream interrompido'))};
-       img.onload=()=>{falhas=0};
-       img.src=url;
-       // O stream MJPEG nao encerra normalmente; aguarda erro ou saida da pagina.
-       const timer=setInterval(()=>{if(!document.body.contains(img)){clearInterval(timer);img.src='';resolve()}},500);
-       const old=img.onerror;
-       img.onerror=()=>{clearInterval(timer);old&&old();};
-     });
-   }catch(e){falhas=Math.min(falhas+1,5)}
-   if(document.body.contains(img)) await new Promise(r=>setTimeout(r,Math.min(1000*falhas,5000)));
- }
-}
-(async()=>{try{const r=await fetch('/api/minhas-cameras',{headers:auth});if(r.status===401){localStorage.removeItem('contagem_token');location.href='/';return}const data=await r.json();if(!r.ok)throw new Error(data.detail||'Erro');if(!data.length){msg.innerHTML='<div class="empty">Nenhuma camera foi vinculada a este usuario.</div>';return}data.forEach(card);
-  setInterval(async()=>{
-    try{
-      const resp=await fetch('/api/minhas-cameras',{headers:auth,cache:'no-store'});
-      if(!resp.ok)return;
-      (await resp.json()).forEach(c=>{
-        const el=[...grid.children].find(el=>el.dataset.camera===c.id);
-        if(!el)return;
-        const nums=el.querySelectorAll('.metric b');
-        if(nums[0])nums[0].textContent=c.total_contado;
-        if(nums[1])nums[1].textContent=c.animais_no_frame_agora;
-        if(nums[2])nums[2].textContent=Number(c.fps_ia||0).toFixed(1);
-        const status=el.querySelector('.status');
-        if(status){status.textContent=c.status.toUpperCase();status.className='status '+(c.status==='online'?'online':'offline')}
-      });
-    }catch{}
-  },2500);
- }catch(e){msg.textContent='Nao foi possivel carregar as cameras.'}})();
-</script></body></html>'''
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#07100c">
+<title>Painel · ContagemSys</title>
+<link rel="icon" href="/static/logo-rebano.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <img src="/static/logo-rebano.svg" alt="Rebano" width="44" height="44">
+      <div><span class="brand-name">ContagemSys</span><span class="brand-sub">Central de monitoramento</span></div>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="clock tabular" aria-live="off"><div class="clock-time" id="clockTime">--:--:--</div><div class="clock-date" id="clockDate"></div></div>
+    <div class="user-chip"><span class="avatar" id="avatar" aria-hidden="true"></span><span class="user-name" id="userName"></span></div>
+    <div class="topbar-actions">
+      <button class="btn" id="fullscreen" type="button" aria-pressed="false" title="Tela cheia">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg><span class="btn-label">Tela cheia</span>
+      </button>
+      <button class="btn btn-ghost" id="logout" type="button" title="Sair">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg><span class="btn-label">Sair</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="main">
+    <nav class="farm-tabs" id="farmTabs" role="tablist" aria-label="Fazendas"></nav>
+
+    <section class="summary" aria-label="Resumo da seleção">
+      <div class="stat">
+        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></div>
+        <div><div class="stat-label">Câmeras online</div><div class="stat-value tabular" id="sumOnline">—</div></div>
+      </div>
+      <div class="stat">
+        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M8 15l4-4 3 3 5-6"/></svg></div>
+        <div><div class="stat-label">Total contado</div><div class="stat-value tabular" id="sumTotal">—</div></div>
+        <span class="stat-note">sessão atual</span>
+      </div>
+      <div class="stat">
+        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14l-5-5 5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg></div>
+        <div><div class="stat-label">Retornos</div><div class="stat-value tabular" id="sumRetornos">—</div></div>
+        <span class="stat-note">sessão atual</span>
+      </div>
+    </section>
+
+    <div class="notice hidden" id="syncNotice" role="status">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+      <span>Não foi possível sincronizar as fazendas com o Rebano. Saia e entre novamente para atualizar o agrupamento.</span>
+    </div>
+
+    <div class="grid-wrap" id="gridWrap">
+      <div class="cam-grid" id="loading" aria-hidden="true" style="--cols:2"><div class="skeleton"></div><div class="skeleton"></div></div>
+      <div class="cam-grid" id="grid" aria-label="Câmeras"></div>
+      <div class="empty-state hidden" id="emptyState">
+        <div>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          <h2>Nenhuma câmera vinculada</h2>
+          <p>Nenhuma câmera foi vinculada a esta conta. Solicite o vínculo ao administrador do ContagemSys.</p>
+        </div>
+      </div>
+      <div class="empty-state hidden" id="loadError" role="alert">
+        <div>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+          <h2>Não foi possível carregar as câmeras</h2>
+          <p>Verifique a conexão com o ContagemSys. O painel tenta novamente sozinho.</p>
+          <p><button class="btn" id="retry" type="button">Tentar agora</button></p>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<section class="viewer hidden" id="viewer" role="dialog" aria-modal="true" aria-labelledby="vTitle">
+  <header class="viewer-head">
+    <button class="btn btn-ghost" id="vClose" type="button" title="Voltar à grade (Esc)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg><span class="btn-label">Voltar</span>
+    </button>
+    <div class="viewer-title"><h2 id="vTitle"></h2><p id="vSub"></p></div>
+    <span class="badge connecting" id="vBadge">Conectando</span>
+    <div class="topbar-spacer"></div>
+    <button class="btn btn-icon" id="vPrev" type="button" aria-label="Câmera anterior" title="Câmera anterior (←)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <button class="btn btn-icon" id="vNext" type="button" aria-label="Próxima câmera" title="Próxima câmera (→)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+  </header>
+  <div class="viewer-body">
+    <div class="viewer-video" id="vVideo">
+      <div class="no-signal connecting" id="vNoSignal"></div>
+      <div class="tile-bottom">
+        <div class="tile-metrics"><span class="metric-chip tabular" id="vTotal"></span><span class="metric-chip tabular" id="vRetornos"></span></div>
+        <span class="tile-time tabular" id="vTime"></span>
+      </div>
+    </div>
+    <aside class="viewer-side">
+      <section><h3 class="section-title">Agora</h3><div class="cards" id="vCards"></div></section>
+      <section><h3 class="section-title">Histórico</h3><div class="cards" id="vStats"></div></section>
+      <section><h3 class="section-title">Eventos recentes</h3><ul class="events" id="vEvents"></ul></section>
+      <details class="raw">
+        <summary>Ver JSON bruto <span class="muted" id="vRawTime"></span></summary>
+        <pre id="vRaw"></pre>
+      </details>
+    </aside>
+  </div>
+</section>
+<script src="/static/painel.js"></script>
+</body>
+</html>'''
 
 ADMIN_HTML = r'''<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin - ContagemSys</title>

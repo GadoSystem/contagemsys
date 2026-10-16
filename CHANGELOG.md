@@ -1,5 +1,24 @@
 # Changelog
 
+## V5.2.0 — nova interface de login e painel
+
+- login e painel redesenhados (tema escuro "centro de monitoramento", identidade do Rebano), sem CDN, fontes externas ou etapa de build;
+- estilos, scripts e logo em `static/` (servidos em `/static`); o logo do Rebano foi movido para `static/logo-rebano.svg`;
+- painel com abas por fazenda (online/total), resumo (câmeras online, total contado, retornos), grade adaptável, relógio e tela cheia;
+- grade usa `frame.jpg` periódico; MJPEG apenas na visão ampliada; bloco "Sem sinal — tentando reconectar" com reconexão automática;
+- visão ampliada com métricas em cartões, histórico, eventos recentes e JSON bruto recolhível;
+- novo `GET /api/minhas-fazendas`: agrupa as câmeras autorizadas pela fazenda do Rebano (`Camera.Identificacao` = id da câmera), consultada com o token do Rebano do próprio usuário mantido só em memória do servidor;
+- testes de agrupamento por fazenda (com e sem correspondência) e de arquivos estáticos.
+
+## V5.1.0 — login por CPF e painel com vídeo + JSON
+
+- login web do ContagemSys passa a usar CPF + senha (CPF validado antes de consultar o Rebano);
+- a senha continua verificada pelo `POST /api/auth/login` do Rebano, que já aceita CPF; nenhum acesso ao banco do Rebano;
+- só é aceita a conta cujo CPF é o informado (o Rebano também tenta o número como telefone);
+- mensagens distintas para campo vazio e CPF inválido; "CPF ou senha incorretos" sem indicar qual dos dois;
+- `/painel`: lista das câmeras do usuário, vídeo MJPEG somente da câmera selecionada (uma conexão por vez), estados de carregamento/indisponível e JSON de `/detalhes`;
+- testes de login por CPF e de acesso negado à câmera de outro usuário.
+
 ## V5.0.0 — login e vínculo câmera/usuário
 
 - login web do ContagemSys validado pelo backend do Rebano;
