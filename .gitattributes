@@ -1,2 +1,3 @@
 *.bat text eol=crlf
 *.iss text eol=crlf
+INSTRUCOES-EXE.txt text eol=crlf

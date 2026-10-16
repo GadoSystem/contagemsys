@@ -1,0 +1,130 @@
+=========================================================
+ CONTAGEMSYS.EXE — CONTEXTO E INSTRUÇÕES PARA TESTE
+=========================================================
+
+CONTEXTO
+--------
+A sua interface nova (login por CPF, painel por fazenda, visão
+ampliada) foi integrada ao projeto sem alterações e já está na
+branch main. Em cima dela entraram três mudanças:
+
+1. Grade do painel mais fluida
+   Antes cada câmera da grade atualizava 1 vez por segundo. Agora:
+   até 4 câmeras na tela  -> ~20 quadros/s
+   até 9 câmeras          -> ~6 quadros/s
+   mais de 9              -> 1 quadro/s (como era antes)
+   Arquivo: static/painel.js
+
+2. Aplicativo desktop (ContagemSys.exe)
+   Como o ContagemSys é instalado na máquina que tem as câmeras, ele
+   passou a abrir o painel numa JANELA PRÓPRIA, sem navegador.
+   - É a mesma interface sua, só que dentro de uma janela do
+     programa (pywebview + WebView2, que já vem no Windows 10/11).
+   - As janelas do OpenCV não abrem nesse modo.
+   - Fechar a janela encerra o ContagemSys inteiro.
+   - Se o WebView2 não existir na máquina, o painel abre no
+     navegador padrão.
+   - A API continua na rede (porta do config.yaml), então a
+     integração com o Rebano não muda.
+   Arquivos novos: desktop.py, contagemsys_app.py, packaging/
+
+3. Correção de travamento na inicialização
+   Com 2 inferências simultâneas (max_concurrent_inferences: 2), o
+   processo às vezes travava inteiro ao iniciar: duas câmeras
+   faziam a primeira análise ao mesmo tempo dentro do OpenVINO.
+   Agora a primeira análise de cada câmera roda uma por vez.
+   No config.yaml do Windows está 1 por vez, então você
+   provavelmente nunca viu esse problema.
+
+O QUE JÁ FOI TESTADO (no Linux)
+-------------------------------
+- Janela própria abrindo com o painel.
+- Pacote do PyInstaller iniciando, login por CPF funcionando e IA
+  rodando dentro do executável (modelos .pt e OpenVINO).
+- 62 testes automatizados passando.
+
+O QUE NUNCA FOI TESTADO
+-----------------------
+- O build no Windows (build_windows.bat) e o .exe rodando no
+  Windows. É isso que precisamos que você teste.
+
+
+GERAR O .EXE
+------------
+Opção A — na sua máquina
+
+  Requisitos:
+  - Python 3.13 64 bits, acessível como "python" no terminal
+  - Internet (a primeira vez baixa mais de 1 GB de dependências)
+  - Opcional: Inno Setup 6 (https://jrsoftware.org/isdl.php) para
+    gerar também o instalador
+
+  Passos:
+  1. Na pasta do projeto:
+       git pull
+  2. Rode (duplo clique ou pelo terminal):
+       packaging\build_windows.bat
+     A primeira vez leva uns 10 a 20 minutos. O script usa um venv
+     próprio (venv-build) e não mexe no seu venv.
+  3. Resultado:
+       dist\ContagemSys\ContagemSys.exe
+     Com o Inno Setup instalado, também:
+       dist\ContagemSys-Setup.exe
+
+Opção B — pelo GitHub, sem instalar nada
+  1. No repositório: Actions > "Build ContagemSys.exe (Windows)"
+     > Run workflow.
+  2. Quando terminar (uns 15 a 30 minutos), baixe
+     "ContagemSys-Setup" em Artifacts e instale.
+
+
+TESTAR
+------
+1. Deixe o backend do Rebano rodando (o login confere a senha
+   nele).
+2. Abra dist\ContagemSys\ContagemSys.exe (ou o programa instalado).
+   Aparece "Iniciando o ContagemSys…" e, em seguida, o login.
+3. Entre com CPF e senha de uma conta do Rebano. No banco de demo:
+     CPF:   529.982.247-25
+     Senha: rebano123
+4. Confira:
+   [ ] a janela abre sem navegador e com o ícone do Rebano
+   [ ] as câmeras aparecem na grade e o vídeo fica fluido
+   [ ] clicar numa câmera abre a visão ampliada; Esc volta
+   [ ] o painel do Rebano continua recebendo as câmeras
+   [ ] fechar a janela encerra o programa (nada fica rodando no
+       Gerenciador de Tarefas)
+   [ ] reabrir mantém o login
+
+
+ONDE FICAM AS COISAS
+--------------------
+Tudo fica ao lado do ContagemSys.exe:
+  config.yaml   câmeras, porta, IA (edite aqui)
+  .env          URL do Rebano e segredos
+  data\         banco local e dados da janela
+  eventos\      clipes de evidência
+  logs\contagem.log   o que antes aparecia no terminal
+
+Instalado pelo instalador, a pasta é:
+  %LOCALAPPDATA%\Programs\ContagemSys
+O instalador não sobrescreve config.yaml e .env ao atualizar.
+
+Para rodar o mesmo modo sem empacotar:
+  python main.py --desktop        (precisa de: pip install pywebview)
+
+
+SE DER PROBLEMA
+---------------
+- Erro no build: o script pausa antes de fechar. Mande print da
+  mensagem.
+- O .exe abre e fecha, ou mostra "Não foi possível iniciar o
+  servidor local": mande o arquivo logs\contagem.log. Uma causa
+  comum é a porta do config.yaml (8000) já estar em uso.
+- Antivírus/SmartScreen bloqueando: o .exe não é assinado. Clique
+  em "Mais informações" > "Executar assim mesmo".
+- Câmera não aparece: é a mesma descoberta de sempre. Confira o
+  config.yaml ao lado do .exe.
+
+O pacote tem cerca de 1 GB por causa do PyTorch/OpenVINO e do
+modelo YOLO. Isso é esperado.
