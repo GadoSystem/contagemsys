@@ -14,10 +14,14 @@
 
   // Intervalos (ms). A grade usa o frame.jpg ja produzido pelo worker da camera:
   // nenhuma captura nova e aberta no servidor e nenhum MJPEG fica aberto na grade.
+  // Com poucas cameras na tela a grade busca quadros na cadencia do video; o
+  // intervalo cresce com a quantidade para nao saturar rede e navegador.
   const POLL_DADOS = 3000;
-  const FRAME_LIVE = 1000;
-  const FRAME_LIVE_MUITAS = 1600;   // mais de 9 cameras visiveis
+  const FRAME_LIVE_POUCAS = 50;     // ate 4 cameras visiveis (~20 FPS)
+  const FRAME_LIVE = 150;           // ate 9 cameras visiveis (~6 FPS)
+  const FRAME_LIVE_MUITAS = 1000;   // mais de 9 cameras visiveis
   const FRAME_RETRY = 3000;
+  const UI_TILE_MS = 500;           // textos/estado do bloco nao precisam de 20 Hz
   const LIVE_MAX_IDADE = 4500;
   const MIN_TILE_PX = 300;
 
@@ -330,23 +334,28 @@
       t.buscando = false;
       const vivo = t.tentativas === 0;
       const visiveis = camerasVisiveis().length;
-      t.proxima = Date.now() + (vivo ? (visiveis > 9 ? FRAME_LIVE_MUITAS : FRAME_LIVE) : FRAME_RETRY);
-      atualizarTile(t);
+      const intervalo = visiveis <= 4 ? FRAME_LIVE_POUCAS : visiveis <= 9 ? FRAME_LIVE : FRAME_LIVE_MUITAS;
+      const agora = Date.now();
+      t.proxima = agora + (vivo ? intervalo : FRAME_RETRY);
+      if (!vivo || agora - (t.ultimaUI || 0) >= UI_TILE_MS) { t.ultimaUI = agora; atualizarTile(t); }
     }
   }
 
+  let ultimaVarreduraUI = 0;
   setInterval(() => {
     if (document.hidden || viewer || saindo) return;   // a visao ampliada usa o MJPEG
     const agora = Date.now();
+    const varrerUI = agora - ultimaVarreduraUI >= 250;
+    if (varrerUI) ultimaVarreduraUI = agora;
     for (const cam of camerasVisiveis()) {
       const t = tiles.get(cam.id);
       if (!t) continue;
       // Camera offline no servidor: nao pede frame (evita 503); volta sozinha
       // quando o status (atualizado a cada POLL_DADOS) ficar online.
       if (t.cam.status === 'online' && !t.buscando && agora >= t.proxima) buscarFrame(t);
-      else atualizarTile(t);
+      else if (varrerUI) atualizarTile(t);
     }
-  }, 250);
+  }, 25);
 
   // ------------------------------------------------------------------ visao ampliada
   const vw = {
