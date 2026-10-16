@@ -1,11 +1,361 @@
-ContagemSys V5
+CONTAGEMSYS + REBANO — INSTALAÇÃO, EXECUÇÃO E TESTES LOCAIS
+=========================================================
+Ambiente: Windows, Visual Studio Code e Git Bash.
+Versão do guia: 16/10/2026 — inclui descoberta automática de câmeras,
+suporte a Iriun e rastreamento de entidades com IDs e contagem direcional.
 
-Leia o arquivo README.md.
+OBJETIVO
+--------
+O Rebano gerencia usuários e exibe as câmeras no navegador. O ContagemSys
+captura as fontes de vídeo, identifica e rastreia entidades com YOLO,
+contabiliza passagens e oferece imagens e dados pela API FastAPI.
+O administrador vincula cada câmera a um usuário do Rebano.
 
-Resumo:
-- /              login do usuário usando a conta do Rebano
-- /painel        câmeras vinculadas ao usuário logado
-- /admin         vínculo manual câmera -> usuário
-- /docs          Swagger da API
+ORDEM DE INICIALIZAÇÃO
+---------------------
+1. PostgreSQL
+2. Backend Rebano (ASP.NET Core)
+3. Frontend Rebano (React + Vite)
+4. ContagemSys (Python + FastAPI + OpenCV + YOLO)
 
-Para teste local, execute primeiro o backend do Rebano e depois: python main.py
+Use um terminal separado para cada uma das três aplicações e mantenha-os
+abertos durante os testes. O PostgreSQL roda como serviço independente.
+
+
+1. PROGRAMAS NECESSÁRIOS
+------------------------
+- Python 3.11 ou 3.12
+- .NET SDK 10
+- Node.js 24 LTS e npm
+- PostgreSQL (pgAdmin é opcional)
+- VS Code com terminal Git Bash
+- Pelo menos uma fonte de vídeo: webcam USB/integrada, Iriun conectado,
+  câmera virtual em funcionamento ou câmera IP acessível
+
+Verifique as versões:
+
+  python --version
+  dotnet --version
+  node --version
+  npm --version
+
+Opcional, caso o PostgreSQL esteja no PATH:
+
+  psql --version
+
+
+2. ESTRUTURA DOS PROJETOS
+-------------------------
+Exemplo:
+
+  Documentos/
+    rebano-system/
+      BackEnd/
+        Rebano/
+          Rebano.csproj
+      FrontEnd/
+        package.json
+    contagemsys/
+      main.py
+      config.yaml
+      requirements.txt
+      .env
+      ajustar_contagem.py
+
+OBSERVAÇÃO: ajustar_contagem.py faz parte da atualização mais recente de
+rastreamento e contagem. Se não existir, aplique primeiro o pacote de
+correção de contagem e IDs ao ContagemSys.
+
+
+3. POSTGRESQL — PREPARAR O BANCO DO REBANO
+-----------------------------------------
+3.1. Inicie o serviço PostgreSQL no Windows.
+3.2. No pgAdmin, confira ou crie o banco de dados "Rebano".
+3.3. Confira o arquivo:
+
+  rebano-system/BackEnd/Rebano/appsettings.json
+
+Verifique "ConnectionStrings" -> "DefaultConnection". Exemplo:
+
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=Rebano;Username=postgres;Password=SUA_SENHA"
+  }
+
+Altere a conexão existente; não substitua o JSON inteiro.
+No ambiente Development, o backend está preparado para aplicar migrações
+automaticamente ao iniciar, desde que a conexão esteja funcionando e o
+usuário do banco tenha as permissões necessárias.
+
+
+4. CONFIGURAÇÃO DA INTEGRAÇÃO REBANO ↔ CONTAGEMSYS
+-------------------------------------------------
+4.1. Na pasta contagemsys, confira se existe o arquivo .env.
+     Se não existir, execute uma única vez:
+
+  cp .env.example .env
+
+4.2. No .env, configure os valores conforme seu ambiente:
+
+  REBANO_API_URL=http://localhost:5148
+  CONTAGEM_INTEGRATION_KEY=SUA_CHAVE_FORTE
+  CONTAGEM_JWT_SECRET=OUTRO_SEGREDO_LONGO_E_ALEATORIO
+  CONTAGEM_ADMIN_USER=admin
+  CONTAGEM_ADMIN_PASSWORD=SUA_SENHA_ADMIN
+
+4.3. Em rebano-system/BackEnd/Rebano/appsettings.json, localize
+     o bloco ContagemApi e ajuste apenas seus campos:
+
+  "ContagemApi": {
+    "BaseUrl": "http://localhost:8000",
+    "IntegrationKey": "SUA_CHAVE_FORTE"
+  }
+
+A chave "IntegrationKey" do Rebano DEVE ser exatamente igual ao valor de
+CONTAGEM_INTEGRATION_KEY no .env do ContagemSys.
+Não envie .env, senhas e chaves para o GitHub.
+
+ATENÇÃO: se Rebano e ContagemSys forem executados em computadores
+DIFERENTES, substitua "localhost" pelo IP da máquina onde está o serviço
+correspondente e libere somente as portas necessárias na rede privada.
+
+
+5. TERMINAL 1 — INICIAR O BACKEND DO REBANO
+------------------------------------------
+No Git Bash aberto na raiz "rebano-system", execute:
+
+  cd BackEnd/Rebano
+  dotnet restore
+  dotnet build
+  dotnet run --launch-profile http
+
+Aguarde a escuta em http://localhost:5148.
+Abra http://localhost:5148/swagger para conferir a API.
+
+Se o banco estiver inicialmente vazio e o seed de desenvolvimento for
+executado, a conta de demonstração poderá ser criada:
+
+  E-mail: demo@rebano.com
+  Senha: rebano123
+
+Se ela não existir, use uma conta já cadastrada. Não utilize senhas de
+demonstração fora do ambiente de desenvolvimento.
+
+DEIXE ESTE TERMINAL ABERTO.
+
+
+6. TERMINAL 2 — INICIAR O FRONTEND DO REBANO
+-------------------------------------------
+Abra outro Git Bash na raiz "rebano-system":
+
+  cd FrontEnd
+  npm ci
+  npm run dev -- --port 5173
+
+"npm ci" é necessário na primeira instalação ou após mudanças nas
+dependências. Nas próximas inicializações, normalmente basta "npm run dev".
+
+Acesse:
+
+  http://localhost:5173
+  http://localhost:5173/UserLogin
+
+Faça login e confira o Dashboard. O comando força a porta 5173; o script
+de desenvolvimento original do projeto usa a porta 80 sem essa opção.
+
+DEIXE ESTE TERMINAL ABERTO.
+
+
+7. TERMINAL 3 — INSTALAR E AJUSTAR O CONTAGEMSYS
+-----------------------------------------------
+Abra a pasta "contagemsys" no VS Code. Confirme que main.py está na raiz.
+
+PRIMEIRA EXECUÇÃO (somente para preparar o ambiente):
+
+  python -m venv venv
+  source venv/Scripts/activate
+  python -m pip install --upgrade pip
+  python -m pip install -r requirements.txt
+
+PRÓXIMAS EXECUÇÕES:
+
+  source venv/Scripts/activate
+
+AJUSTE DA NOVA CONTAGEM (somente ao instalar a atualização, ou quando
+quiser reaplicar o perfil recomendado):
+
+  python ajustar_contagem.py
+
+Esse comando cria um backup chamado config.yaml.antes_contagem.bak
+(quando necessário) e ajusta APENAS estas opções:
+
+  video.inference_fps: 5.0       (alvo de inferências por câmera)
+  model.confidence: 0.25         (confiança mínima)
+  model.imgsz: 384              (resolução de inferência)
+  gate.stable_frames: 1         (travessias mais rápidas)
+  display.max_box_age_ms: 2200  (mantém a caixa entre inferências)
+
+Não apaga as câmeras cadastradas nem os IDs já utilizados nos vínculos.
+O comando não deve ser executado obrigatoriamente em toda inicialização.
+
+IMPORTANTE: FPS da IA é diferente do FPS de captura e do stream. A taxa
+real depende do processador e do número de câmeras em funcionamento.
+
+
+8. DESCOBRIR, CONFERIR E INICIAR AS CÂMERAS
+------------------------------------------
+8.1. Conecte as webcams antes de iniciar. Feche Teams, Zoom e outros
+     programas que possam estar capturando o mesmo dispositivo.
+     Para o Iriun, abra o aplicativo no computador e no celular e
+     confirme que a imagem real está sendo transmitida.
+
+8.2. Para descobrir as fontes e atualizar video.cameras no config.yaml
+     sem iniciar o processamento YOLO:
+
+  python main.py --discover-only
+
+8.3. Revise no config.yaml os campos "source", "backend", "enabled",
+     "id" e "name" de cada câmera. Confira os vínculos caso mude a
+     identificação física das fontes.
+
+8.4. Se estiver usando Iriun ou outro dispositivo que entrega frames
+     válidos mas apresenta uma cena estática, confira:
+
+  discovery:
+    webcam:
+      backend: "auto"
+      accept_static_frames: true
+
+Essas linhas são somente um TRECHO de referência: altere as opções no
+bloco existente, sem criar outro "discovery". A aceitação de frames
+estáticos ajuda no Iriun, mas também pode aceitar fontes com imagem
+congelada; sempre confirme visualmente se o vídeo é real e atualizado.
+Depois dessa alteração, repita: python main.py --discover-only.
+
+8.5. Caso a descoberta falhe, com ContagemSys ENCERRADO, teste:
+
+  python listar_cameras.py --backend dshow --max 6 --preview
+  python listar_cameras.py --backend msmf --max 6 --preview
+
+Os índices da mesma webcam podem mudar entre DSHOW e MSMF. Não misture
+índices de backends diferentes manualmente.
+
+8.6. Inicie o sistema:
+
+  python main.py
+
+Ele descobre as fontes (quando discovery.enabled=true), inicia a API
+na porta 8000 e abre as janelas locais com app.show_window=true.
+Para iniciar sem redescobrir os dispositivos:
+
+  python main.py --no-discovery
+
+Para encerrar TUDO: selecione uma janela de vídeo e pressione Q.
+Se nenhuma janela abrir, pressione Ctrl+C no terminal.
+
+NOTA: câmeras IP só são descobertas automaticamente quando acessíveis
+pelo ONVIF compatível na rede local. Outros modelos exigem cadastrar a
+URL RTSP/HTTP em discovery.ip_streams e, quando necessário, credenciais.
+
+
+9. VINCULAR AS CÂMERAS AOS USUÁRIOS DO REBANO
+--------------------------------------------
+9.1. Abra http://localhost:8000/admin.
+9.2. Entre com CONTAGEM_ADMIN_USER e CONTAGEM_ADMIN_PASSWORD do .env.
+9.3. Associe cada câmera ativa ao usuário correspondente e salve.
+9.4. Acesse http://localhost:8000 e entre com a conta do Rebano.
+9.5. Confira as câmeras vinculadas em http://localhost:8000/painel.
+
+Cada usuário deve acessar somente as câmeras associadas ao seu ID no
+Rebano. Revise os vínculos depois de alterar dispositivos ou índices.
+
+
+10. TESTAR DETECÇÃO, IDs, CONTAGEM E TRANSMISSÃO
+------------------------------------------------
+10.1. Abra http://localhost:5173/Cameras no Rebano.
+10.2. Confirme que cada webcam transmite imagem própria, sem replicação.
+10.3. Deixe duas câmeras abertas por pelo menos cinco minutos (se houver).
+10.4. Clique em "Detalhes da câmera" e confira indicadores e histórico.
+10.5. Para validar a contagem, deixe a câmera fixa e bem iluminada.
+      A pessoa deve aparecer fora da faixa central antes de atravessá-la.
+
+Com "model.classes: [0]", o modelo detecta PESSOAS, para teste.
+
+- Cada pessoa detectada deve receber uma caixa com ID individual.
+- Azul/laranja: entidade em rastreamento, ainda não contada.
+- Verde: entidade contabilizada ao cruzar da DIREITA para a ESQUERDA.
+- Vermelho: retorno no sentido ESQUERDA para DIREITA.
+- A travessia válida aumenta o total apenas uma vez para o mesmo ID.
+- O retorno não deve adicionar uma nova contagem.
+- Teste duas pessoas juntas e confira se ambas são identificadas.
+
+O rastreador pode trocar IDs após uma oclusão longa, saída prolongada
+do enquadramento ou cruzamentos muito próximos. A câmera não deve ser
+movimentada durante um teste de travessia.
+
+No terminal do ContagemSys, acompanhe as métricas periódicas:
+
+  deteccoes=...   -> quantos objetos o YOLO identificou
+  ids_ativos=...  -> quantas entidades estão sendo rastreadas
+  fps_ia=...     -> velocidade efetiva de inferência
+  inferencia=... -> duração da análise de um frame, em ms
+
+Para o futuro teste com bovinos em modelo com classes COCO, ajuste
+"model.classes" para [19] e valide com vídeos reais do curral.
+A configuração [0] NÃO realiza contagem de bois.
+
+
+11. ENDEREÇOS ÚTEIS
+-------------------
+  http://localhost:5148/swagger  -> API do Rebano (Swagger)
+  http://localhost:5173          -> Frontend do Rebano
+  http://localhost:5173/Cameras  -> Monitoramento no Rebano
+  http://localhost:8000/health   -> Saúde do ContagemSys
+  http://localhost:8000/docs     -> API do ContagemSys (Swagger)
+  http://localhost:8000/admin    -> Administração e vínculos
+  http://localhost:8000/painel   -> Câmeras do usuário
+
+
+12. PROBLEMAS FREQUENTES
+-----------------------
+- Rebano não inicia: confira o serviço PostgreSQL e DefaultConnection.
+- Erro 401/502: compare as chaves de integração e as URLs das duas APIs.
+- Erro 404 em "detalhes": confira no Swagger a rota correspondente na
+  versão do backend Rebano que está realmente executando.
+- Dashboard fica branco após login: pressione F12 > Console, veja o erro
+  JavaScript e confira se aplicou a atualização de tratamento de erros.
+- Câmera não aparece: confira driver, fonte "enabled", permissões,
+  sinal de vídeo e, no caso do Iriun, conexão com o celular.
+- Iriun encontrado e depois descartado: habilite accept_static_frames
+  e teste o backend MSMF. Confirme a imagem real antes de ativá-lo.
+- Duas webcams travam: teste captura conjunta, portas USB diferentes,
+  resolução menor e FPS de captura reduzido; confira a carga de CPU.
+- IP não detectado: verifique rede, ONVIF, RTSP/HTTP e autenticação.
+- Câmera no ContagemSys, mas não no Rebano: confira vínculo do usuário,
+  chave de integração, API ativa e permissões da conta.
+- Vídeo fluido, porém sem caixas: confira "deteccoes" no terminal,
+  model.classes, iluminação, confiança mínima e resolução do modelo.
+- Há IDs, mas nenhuma contagem: confira se a pessoa cruza as DUAS linhas
+  completamente, a direção e a posição inicial fora da faixa central.
+- FPS da IA baixo: experimente model.imgsz: 320 e
+  video.inference_fps: 3, preservando capture/stream independentes.
+- Porta ocupada: finalize outra instância do serviço antes de iniciar.
+
+
+13. TESTES AUTOMATIZADOS E COMPILAÇÃO
+------------------------------------
+ContagemSys (na raiz do projeto, com venv ativo):
+
+  python -m unittest discover -s tests -v
+
+Backend Rebano (na pasta BackEnd/Rebano):
+
+  dotnet build
+
+Frontend Rebano (na pasta FrontEnd):
+
+  npm run build
+
+Esses testes ajudam a verificar o código, mas não substituem testes
+com câmeras reais, várias entidades, conexão USB e transmissão de rede.
+
+FIM DO GUIA

@@ -1,120 +1,210 @@
-# ContagemSys V5 — câmeras vinculadas ao usuário
+# ContagemSys V5 — Monitoramento e contagem inteligente de rebanhos
 
-O ContagemSys continua fazendo a detecção/contagem, mas agora funciona também como aplicação web.
+O **ContagemSys** é um sistema de visão computacional que recebe imagens de câmeras, identifica e acompanha objetos em movimento e registra a passagem deles por uma região de contagem. Ele possui uma **API e um painel web** e foi integrado ao **Rebano**, sistema de gestão agropecuária, para que cada usuário visualize apenas as câmeras vinculadas à sua conta.
 
-## Como funciona
+O desenvolvimento é direcionado à contagem de **bovinos**, mas a configuração de testes atual utiliza **pessoas**. O comportamento com bovinos deve ser validado em campo, com modelo e classes adequados.
 
-1. As câmeras são cadastradas em `config.yaml`.
-2. O administrador abre `/admin` e vincula cada câmera a um usuário do **Rebano**.
-3. O usuário entra no ContagemSys usando o **mesmo login e senha do Rebano**.
-4. Ele vê somente as câmeras vinculadas ao `Usuario.Id` dele.
-5. O backend do Rebano usa a mesma regra para mostrar apenas as câmeras do usuário logado.
+> **Para instalar e executar os dois projetos, consulte [LEIA-ME.txt](LEIA-ME.txt).** Este README apresenta a arquitetura, tecnologias, funcionalidades e principais configurações.
 
-Exemplo:
+## 1. Visão geral
+
+O ContagemSys foi desenvolvido para auxiliar no acompanhamento de movimentações por câmeras, com contagem automática e consulta remota dos resultados.
+
+Principais recursos:
+
+- **Detecção por IA:** YOLO detecta objetos nas imagens capturadas.
+- **Rastreamento:** ByteTrack acompanha as detecções entre frames, ajudando a evitar contagens repetidas.
+- **Contagem direcional:** a passagem da direita para a esquerda incrementa a contagem; o trajeto contrário pode ser tratado como retorno.
+- **Múltiplas fontes de vídeo:** webcams USB/integradas, dispositivos virtuais (como Iriun, quando disponíveis) e câmeras IP com streams compatíveis.
+- **Descoberta de fontes:** verifica câmeras locais e pode procurar câmeras IP via ONVIF; atualiza a seção `video.cameras` do `config.yaml` antes de iniciar.
+- **Exibição local e remota:** janelas OpenCV, painel web próprio e exibição via Rebano.
+- **Informações por câmera:** total contado, detecções no frame, retornos, FPS e latência da IA, conforme disponibilidade.
+- **Histórico:** registros de eventos e estatísticas no banco SQLite local do ContagemSys.
+- **Controle de acesso:** o administrador associa câmeras ao `Usuario.Id` do Rebano e cada usuário visualiza apenas as autorizadas.
+
+## 2. Arquitetura e integração
 
 ```text
-Guilherme -> camera_1, camera_2, camera_3
-Arthur    -> camera_4
+Webcam USB / câmera integrada / Iriun / câmera IP
+                       |
+                       v
+             ContagemSys (Python)
+           OpenCV + YOLO + ByteTrack
+                       |
+          +------------+------------+
+          |                         |
+    Painel próprio                 FastAPI
+ localhost:8000               localhost:8000
+                                    |
+                             API HTTP / MJPEG
+                                    |
+                           Backend do Rebano
+                         ASP.NET Core / porta 5148
+                                    |
+                            Frontend do Rebano
+                             React + Vite
 ```
 
-Guilherme vê 3 câmeras. Arthur vê somente 1.
+**Como funciona a autorização:**
 
-## Teste local rápido
+1. O Rebano cadastra e autentica os usuários.
+2. O administrador do ContagemSys abre `/admin` e vincula cada câmera a um usuário do Rebano.
+3. O ContagemSys autentica o usuário com as credenciais do Rebano.
+4. O backend do Rebano consulta as câmeras autorizadas e disponibiliza os dados e o vídeo ao usuário logado.
+5. Cada câmera é consultada pelo identificador (`camera_1`, `camera_2`, etc.). Se a ordem física dos dispositivos mudar, confira os vínculos no painel administrativo.
 
-### 1. Configure as câmeras
+**Importante:** nesta arquitetura, as webcams locais são capturadas pelo computador que executa o ContagemSys. Ter uma câmera USB conectada em outro computador não faz com que ela apareça automaticamente no servidor remoto; isso exigiria um agente de captura/encaminhamento naquele computador ou uma fonte de rede acessível.
 
-Em `config.yaml`:
+## 3. Tecnologias utilizadas
+
+### ContagemSys
+
+| Tecnologia | Utilização |
+| --- | --- |
+| Python | Aplicação principal, processamento e integração |
+| OpenCV | Abertura de câmeras, captura e renderização dos frames |
+| Ultralytics YOLO | Detecção de objetos por inteligência artificial |
+| ByteTrack | Rastreamento de objetos entre frames |
+| PyTorch | Execução do modelo de IA |
+| FastAPI + Uvicorn | API HTTP, autenticação e transmissão de vídeo |
+| MJPEG / JPEG | Exibição remota de frames em tempo real |
+| SQLite | Persistência local de eventos e contagens |
+| PyYAML | Leitura e atualização de `config.yaml` |
+| HTTPX + PyJWT | Comunicação com o Rebano e autenticação |
+| ONVIF / RTSP | Localização e acesso a câmeras IP compatíveis |
+
+### Rebano (projeto integrado)
+
+| Tecnologia | Utilização |
+| --- | --- |
+| C# + ASP.NET Core (.NET 10) | API backend e regras de negócio |
+| Entity Framework Core | Persistência e migrações do banco |
+| PostgreSQL | Banco de dados dos usuários e da gestão agropecuária |
+| JWT | Autenticação e autorização do usuário |
+| React + TypeScript | Interface web |
+| Vite | Ambiente de desenvolvimento e compilação do frontend |
+| Tailwind CSS | Estilização das páginas |
+| Leaflet / Chart.js | Mapas e visualizações de dados |
+
+O Rebano também gerencia informações como fazendas, animais, piquetes, movimentações, equipamentos, plantações e relatórios. A integração com o ContagemSys acrescenta o acompanhamento das câmeras autorizadas.
+
+## 4. Organização dos arquivos principais
+
+```text
+contagemsys/
+├── main.py                  # Inicialização, câmeras e processamento
+├── api.py                   # Endpoints FastAPI
+├── auth.py                  # Autenticação e integração
+├── camera_discovery.py      # Descoberta/validação de fontes
+├── camera_stream.py         # Captura e entrega dos frames
+├── listar_cameras.py        # Diagnóstico das fontes de vídeo
+├── counting.py              # Lógica de contagem
+├── persistence.py           # Eventos e armazenamento SQLite
+├── config.yaml              # Câmeras, IA, streaming e desempenho
+├── .env                     # Endereços e segredos (não publicar)
+├── .env.example             # Modelo de configuração
+├── requirements.txt         # Dependências Python
+├── data/contagem.db         # Banco local, após inicialização
+├── README.md                # Documentação do sistema
+└── LEIA-ME.txt              # Como executar os dois projetos
+```
+
+## 5. Câmeras e descoberta automática
+
+Ao executar `python main.py`, com `discovery.enabled: true`, o sistema tenta:
+
+1. Examinar as fontes de vídeo locais usando os backends compatíveis com o sistema operacional (no Windows, DirectShow/Media Foundation).
+2. Validar se as fontes entregam imagens. A descoberta também avalia o funcionamento simultâneo para reduzir conflitos entre webcams.
+3. Buscar dispositivos IP que anunciam **ONVIF** na rede local e testar streams acessíveis.
+4. Testar endereços RTSP/HTTP informados em `discovery.ip_streams`.
+5. Atualizar `video.cameras` no `config.yaml`, preservando, sempre que possível, os identificadores das câmeras já cadastradas.
+
+**Limitações:** nem toda câmera IP anuncia ONVIF, algumas exigem credenciais e certas câmeras virtuais podem apresentar telas estáticas mesmo sem imagem real. Dispositivos USB podem compartilhar drivers/controladores e não funcionar simultaneamente. A descoberta automática não garante acesso a toda câmera existente.
+
+Comandos úteis (na pasta do ContagemSys e com o ambiente virtual ativo):
+
+```bash
+python main.py                    # Descobre câmeras e inicia o sistema
+python main.py --discover-only    # Apenas descobre e atualiza o YAML
+python main.py --no-discovery     # Usa a lista de fontes já configurada
+python listar_cameras.py --backend dshow --max 6 --preview
+```
+
+Para câmera IP sem descoberta ONVIF, informe a URL de stream fornecida pelo fabricante:
 
 ```yaml
-video:
-  cameras:
-    - id: "camera_1"
-      name: "Webcam 1"
-      source: 0
-      enabled: true
-
-    - id: "camera_2"
-      name: "Webcam 2"
-      source: 1
-      enabled: true
+discovery:
+  ip_streams:
+    - name: "Câmera do curral"
+      url: "rtsp://192.168.1.50:554/stream1"
+      username_env: "CAMERA_IP_USER"
+      password_env: "CAMERA_IP_PASS"
 ```
 
-Para descobrir os índices:
+As variáveis `CAMERA_IP_USER` e `CAMERA_IP_PASS` são definidas no `.env`; não publique senhas nos arquivos versionados. A URL acima é **um exemplo**, não um endereço universal.
 
-```bash
-python listar_cameras.py
-```
+## 6. Processamento e contagem
 
-### 2. Instale e execute
+- **Modelo:** configurado em `model.path` (nesta versão, `yolo26n.pt`).
+- **Classe de teste:** `model.classes: [0]` seleciona **pessoas** nos modelos baseados em COCO. A classe `19` corresponde a bovinos no conjunto COCO, mas sua adequação precisa ser validada com vídeos reais.
+- **Sentido de contagem:** `gate.count_direction: right_to_left`.
+- **Região e linhas:** configuradas em `roi` e `gate` dentro de `config.yaml`.
+- **Fluidez:** a captura e o vídeo são separados das inferências YOLO; por isso, `api.stream_fps`, `display.preview_fps` e `video.inference_fps` podem ter valores diferentes.
+- **Evidências:** gravações e snapshots dependem de `evidence.enabled` e das demais opções de evidência.
 
-```bash
-python -m venv venv
-```
+Na execução local, se `app.show_window: true`, as janelas do OpenCV são abertas. Com uma dessas janelas em foco, **Q** solicita o encerramento das câmeras e da API; **Ctrl+C** no terminal também encerra.
 
-PowerShell:
+## 7. Configuração da integração com o Rebano
 
-```powershell
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python main.py
-```
-
-O Rebano precisa estar rodando em `http://localhost:5148`.
-
-### 3. Vincule as câmeras
-
-Abra:
-
-```text
-http://localhost:8000/admin
-```
-
-Login de teste:
-
-```text
-Usuário: admin
-Senha: admin123
-```
-
-Escolha o usuário do Rebano em cada câmera e clique em **Salvar**.
-
-### 4. Teste como usuário
-
-Abra:
-
-```text
-http://localhost:8000
-```
-
-Entre com o login normal do Rebano. O painel deve mostrar somente as câmeras vinculadas àquele usuário.
-
-## Variáveis importantes
-
-Arquivo `.env`:
+O ContagemSys lê o arquivo `.env` (use `.env.example` como modelo):
 
 ```env
 REBANO_API_URL=http://localhost:5148
-CONTAGEM_INTEGRATION_KEY=REBANO_CONTAGEM_TEST_2026
+CONTAGEM_JWT_SECRET=GERE_UM_SEGREDO_ALEATORIO
+CONTAGEM_INTEGRATION_KEY=USE_A_MESMA_CHAVE_NOS_DOIS_SISTEMAS
 CONTAGEM_ADMIN_USER=admin
-CONTAGEM_ADMIN_PASSWORD=admin123
+CONTAGEM_ADMIN_PASSWORD=DEFINA_UMA_SENHA_FORTE
 ```
 
-A `CONTAGEM_INTEGRATION_KEY` deve ser igual à `ContagemApi:IntegrationKey` do Rebano.
+No backend do Rebano, em `BackEnd/Rebano/appsettings.json`, configure:
 
-## Quando colocar na web
-
-Para teste local, `source: 0` e `source: 1` usam webcams do computador onde o Python está rodando.
-
-Em um servidor web/VPS, as câmeras precisam ser acessíveis pelo servidor, normalmente por URL RTSP/IP, por exemplo:
-
-```yaml
-source: "rtsp://usuario:senha@IP_DA_CAMERA:554/stream"
+```json
+"ContagemApi": {
+  "BaseUrl": "http://localhost:8000",
+  "IntegrationKey": "USE_A_MESMA_CHAVE_NOS_DOIS_SISTEMAS"
+}
 ```
 
-Hospedagem compartilhada comum não é indicada para YOLO/FastAPI e acesso a câmeras. Para produção, use um VPS/servidor com Python e recursos suficientes.
+Esse trecho é parte de um JSON maior: **não substitua o arquivo inteiro**. A chave `IntegrationKey` do Rebano deve ser exatamente igual à `CONTAGEM_INTEGRATION_KEY` do ContagemSys. Use segredos reais e fortes, mantidos fora do controle de versão. Em máquinas diferentes, substitua `localhost` pelos endereços acessíveis de cada servidor.
 
-## Testes automatizados
+## 8. Interfaces e endereços locais
+
+| Serviço | Endereço padrão |
+| --- | --- |
+| Login ContagemSys | `http://localhost:8000/` |
+| Painel do usuário ContagemSys | `http://localhost:8000/painel` |
+| Administração ContagemSys | `http://localhost:8000/admin` |
+| Swagger ContagemSys | `http://localhost:8000/docs` |
+| Saúde ContagemSys | `http://localhost:8000/health` |
+| API do Rebano | `http://localhost:5148` |
+| Swagger Rebano | `http://localhost:5148/swagger` |
+| Frontend Rebano (teste recomendado) | `http://localhost:5173` |
+| Câmeras no Rebano | `http://localhost:5173/Cameras` |
+
+A porta do frontend é **5173 quando iniciado conforme o LEIA-ME.txt**. O comando `npm run dev` sem parâmetro usa a porta **80** definida no `package.json` atual.
+
+## 9. Testes, limitações e segurança
+
+Execute os testes automatizados do ContagemSys:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+Valide também as câmeras reais, os vínculos de usuário e a exibição no Rebano. Os testes automatizados **não comprovam a estabilidade** de todas as webcams, câmeras IP ou redes.
+
+**Para produção:** substitua todas as credenciais de teste, use HTTPS e uma configuração de CORS/rede restrita, não exponha streams nem chaves de integração publicamente, e dimensione CPU/GPU, memória e armazenamento para o número de câmeras. Uma hospedagem compartilhada convencional não é adequada ao processamento contínuo por YOLO.
+
+---
+
+**Próxima etapa:** [LEIA-ME.txt](LEIA-ME.txt) — instalação e execução detalhadas de PostgreSQL, backend/frontend do Rebano e ContagemSys no Windows com VS Code e Git Bash.

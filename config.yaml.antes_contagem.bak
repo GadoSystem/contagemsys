@@ -1,0 +1,148 @@
+app:
+  name: "Sistema de Contagem em Tempo Real - V5 Web"
+  # 0.0.0.0 permite que outra maquina da mesma rede acesse a API.
+  host: "0.0.0.0"
+  port: 8000
+  # true restaura as janelas de visualizacao local do OpenCV (Q encerra).
+  show_window: true
+
+api:
+  # Login e integracao sao configurados no .env.
+  # Menor qualidade reduz CPU/rede sem prejudicar o acompanhamento no Rebano.
+  jpeg_quality: 72
+  # O video da API nao precisa acompanhar os 30 FPS da webcam.
+  stream_fps: 12
+  # false envia somente o video anotado para o Rebano; economiza CPU e rede.
+  include_sidebar: false
+
+# A tela local roda separada da IA. Assim o video continua fluido mesmo quando
+# a inferencia estiver em 4-8 FPS.
+display:
+  preview_fps: 15
+  # Se a IA demorar demais, nao deixa uma box antiga parada na tela indefinidamente.
+  max_box_age_ms: 700
+  sidebar:
+    enabled: true
+    width: 280
+    position: "left"
+
+# IMPORTANTE PARA DUAS WEBCAMS EM CPU:
+# 1 = uma inferencia YOLO por vez. As cameras se alternam e nao brigam por todos
+# os nucleos do processador. Se no futuro usar uma GPU forte, teste 2.
+performance:
+  max_concurrent_inferences: 1
+  # 0 = automatico (metade dos nucleos, no maximo 4).
+  torch_threads: 2
+  opencv_threads: 1
+
+# A descoberta acontece automaticamente em TODOS os inicios de python main.py.
+# Windows: busca webcams USB, notebook, Iriun/OBS/virtuais por DirectShow,
+# escolhe o que encontrar mais fontes validas, sem misturar indices.
+# Sao aceitas somente fontes que realmente entregam frames em movimento.
+# Cameras IP: busca dispositivos ONVIF na mesma LAN e valida o RTSP.
+# Sem ONVIF, adicione a URL da camera em ip_streams.
+discovery:
+  enabled: true
+  webcam:
+    enabled: true
+    backend: "auto"
+    max_index: 6
+    samples: 8
+    # Uma imagem permanentemente identica costuma indicar fonte virtual sem sinal.
+    # Se uma camera fisica de cena muito estatica for ignorada, mude para true.
+    accept_static_frames: true
+    # Se duas webcams se bloquearem, tenta um perfil 320x240 / 10 FPS.
+    fallback_low_bandwidth: true
+  onvif:
+    enabled: true
+    timeout_seconds: 2.0
+    username_env: "ONVIF_USERNAME"
+    password_env: "ONVIF_PASSWORD"
+  ip_probe_timeout_ms: 2200
+  # IP sem ONVIF? Informe URL RTSP ou HTTP/MJPEG aqui.
+  # Opcional username_env e password_env guardam credenciais no .env (nao no YAML).
+  # Exemplo (descomente e ajuste):
+  # ip_streams:
+  #   - name: "Corredor da fazenda"
+  #     url: "rtsp://192.168.1.50:554/stream1"
+  #     username_env: "CAMERA_IP_USER"
+  #     password_env: "CAMERA_IP_PASS"
+  ip_streams: []
+
+video:
+  # 640x480 + MJPG reduz muito o uso do barramento USB com duas webcams.
+  width: 640
+  height: 480
+  fps: 12
+  # "dshow" fixo no Windows: com "auto", uma camera podia abrir por DirectShow e a
+  # outra por Media Foundation, que numeram as webcams em ordem diferente, e as duas
+  # acabavam lendo a mesma camera fisica.
+  backend: "dshow"
+  fourcc: "MJPG"
+
+  # FPS da IA reduzido em CPU: nao limita o FPS do video transmitido.
+  inference_fps: 2.0
+  inference_stride: 1
+
+  # Esta lista sera atualizada AUTOMATICAMENTE no inicio de main.py.
+  # IDs e configuracoes anteriores permanecem para preservar o vinculo no Rebano.
+  # Fontes sem imagem valida ficam com enabled: false.
+  cameras:
+  - id: camera_1
+    name: Webcam 1
+    source: 0
+    enabled: true
+    width: 640
+    height: 480
+    fps: 12
+    backend: dshow
+  - id: camera_2
+    name: Webcam 2
+    source: 1
+    enabled: false
+    backend: dshow
+  - id: camera_3
+    name: Camera 3
+    source: 2
+    backend: dshow
+    enabled: false
+model:
+  path: "yolo26n.pt"
+  # 0 = person para testes. Para COCO, 19 = cow.
+  classes: [0]
+  confidence: 0.35
+  # 320 e o perfil recomendado para duas webcams em CPU.
+  # Se tiver GPU ou precisar detectar objetos pequenos, tente 416.
+  imgsz: 320
+  device: null
+  tracker: "tracker_bytetrack.yaml"
+
+roi:
+  enabled: false
+  x1: 0.0
+  y1: 0.0
+  x2: 1.0
+  y2: 1.0
+
+gate:
+  left_x: 0.42
+  right_x: 0.58
+  stable_frames: 2
+  stale_after_frames: 120
+  count_direction: "right_to_left"
+  anchor: "bottom_center"
+
+persistence:
+  database: "data/contagem.db"
+  max_api_events: 200
+
+evidence:
+  # Desativado para testar fluidez sem gravacao; reative apos validar a captura.
+  enabled: false
+  directory: "eventos"
+  save_snapshot: true
+  save_clip: true
+  pre_seconds: 2.0
+  post_seconds: 2.0
+  # 12 FPS reduz copias de frame e escrita em disco sem perder o contexto do evento.
+  clip_fps: 12.0

@@ -59,14 +59,16 @@ def open_video_source(source: Any, *, backend: str = "auto", width: int | None =
         cap.release()
         return None
     if is_index:
+        # Seleciona o formato comprimido ANTES de negociar a resolucao/FPS.
+        # Em diversos drivers UVC, MJPG evita saturacao do barramento com 2 USB.
+        if fourcc and len(fourcc) == 4:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
         if width:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
         if height:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
         if fps:
             cap.set(cv2.CAP_PROP_FPS, int(fps))
-        if fourcc and len(fourcc) == 4:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
@@ -159,6 +161,8 @@ class LatestFrameCamera:
         return [("default", None)]
 
     def _configure_capture(self, cap: cv2.VideoCapture) -> None:
+        if self.fourcc and len(self.fourcc) == 4:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
         if self.width:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.width))
         if self.height:
@@ -168,8 +172,6 @@ class LatestFrameCamera:
         # MJPG reduz o trafego USB de duas webcams quando o dispositivo suporta.
         # No DirectShow o FOURCC so vale se vier DEPOIS da resolucao: antes, a
         # troca de resolucao volta a camera para YUY2 (sem compressao, ~18 MB/s).
-        if self.fourcc and len(self.fourcc) == 4:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def start(self) -> "LatestFrameCamera":
@@ -249,3 +251,6 @@ class LatestFrameCamera:
         if self.cap is not None:
             self.cap.release()
         self.cap = None
+        if self._thread and self._thread.is_alive():
+            # Aguarda liberar a captura anterior ANTES de tentar reconectar.
+            self._thread.join(timeout=1.0)

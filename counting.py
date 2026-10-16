@@ -102,6 +102,14 @@ class GateCounter:
                 state.touched_center = True
                 return None
 
+            # O YOLO nao analisa necessariamente cada frame da webcam. Quando
+            # alguem atravessa rapidamente, pode haver RIGHT -> LEFT direto,
+            # sem amostra na zona CENTER. A travessia entre as DUAS fronteiras
+            # confirma a passagem, mesmo que o quadro intermediario falte.
+            if (previous, observed_zone) in (("RIGHT", "LEFT"), ("LEFT", "RIGHT")):
+                state.origin_side = previous
+                state.touched_center = True
+
             # Voltou ao mesmo lado sem completar a travessia.
             if observed_zone in ("LEFT", "RIGHT") and observed_zone == state.origin_side:
                 state.touched_center = False

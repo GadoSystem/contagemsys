@@ -43,12 +43,13 @@ def _thumbnail(frame: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
 
 
-def validate_capture(cap, samples: int = 8, sample_delay: float = .10,
-                     accept_static: bool = False) -> tuple[bool, str]:
-    """Frames vivos suficientes; placeholders identicos sao considerados sem sinal.
+def probe_capture(cap, samples: int = 8, sample_delay: float = .10,
+                  accept_static: bool = False) -> tuple[bool, int, str]:
+    """Confirma leitura de frames. Movimento e sinal auxiliar, nao prova de vida.
 
-    Video REAL sem movimento pode ser estacionario; desligue o filtro com
-    discovery.webcam.accept_static_frames se for o caso.
+    Uma camera real pode permanecer imovel por todo o intervalo da sondagem,
+    especialmente webcams virtuais (Iriun) e ambientes escuros. A politica
+    accept_static deixa ao usuario a decisao de aceitar uma fonte assim.
     """
     previous = None
     valid = 0
@@ -65,10 +66,18 @@ def validate_capture(cap, samples: int = 8, sample_delay: float = .10,
             previous = current
         time.sleep(max(0.0, sample_delay))
     if valid < max(3, samples // 2):
-        return False, f"captura incompleta ({valid}/{samples} frames)"
+        return False, changed, f"captura incompleta ({valid}/{samples} frames)"
     if changed == 0 and not accept_static:
-        return False, "imagem sem mudancas; possivel camera virtual sem sinal ou congelada"
-    return True, f"{valid} frames, {changed} atualizacoes visuais"
+        return False, changed, "imagem sem mudancas; possivel camera virtual sem sinal ou congelada"
+    note = " [IMAGEM ESTATICA: confirme se nao e tela de espera]" if changed == 0 else ""
+    return True, changed, f"{valid} frames, {changed} atualizacoes visuais{note}"
+
+
+def validate_capture(cap, samples: int = 8, sample_delay: float = .10,
+                     accept_static: bool = False) -> tuple[bool, str]:
+    """Compatibilidade com chamadas existentes; retorna sucesso e diagnostico."""
+    ok, _changed, msg = probe_capture(cap, samples, sample_delay, accept_static)
+    return ok, msg
 
 
 def preferred_webcam_backends(selected: str = "auto") -> list[str]:
@@ -81,49 +90,113 @@ def preferred_webcam_backends(selected: str = "auto") -> list[str]:
 
 
 def scan_webcams(options: dict[str, Any], video: dict[str, Any]) -> list[dict[str, Any]]:
+    """Valida fontes SIMULTANEAMENTE, nao apenas uma webcam por vez.
+
+    A antiga descoberta abria webcam 0, fechava, abria webcam 1, fechava.
+    Ambas podiam funcionar isoladas, mas disputar a mesma camera/USB quando
+    ligadas juntas. Mantemos os handles vivos durante a verificacao; um novo
+    dispositivo que paralisa um anterior nao e ativado automaticamente.
+    """
     max_index = max(1, min(16, int(options.get("max_index", 6))))
     samples = int(options.get("samples", 8))
     accept_static = bool(options.get("accept_static_frames", False))
     backends = preferred_webcam_backends(options.get("backend", "auto"))
-
-    # Um unico backend para todo o sistema. Nunca combinar indices DSHOW+MSMF:
-    # pode fazer duas configuracoes diferentes apontarem para a mesma webcam.
+    width = int(video.get("width", 640))
+    height = int(video.get("height", 480))
+    fps = int(video.get("fps", 12))
+    fourcc = str(video.get("fourcc", "MJPG"))
     best_found: list[dict[str, Any]] = []
     best_backend = None
-    for backend in backends:
-        found: list[dict[str, Any]] = []
-        print(f"[descoberta] Webcams por {backend.upper()}, indices 0..{max_index-1}", flush=True)
-        for index in range(max_index):
-            cap = None
+    best_score = (-1, -1)
+    # So tenta perfil mais leve quando DUAS fontes parecem validas isoladamente,
+    # mas a segunda bloqueia a primeira. Nao dobra o scan sem necessidade.
+    profiles = [(width, height, fps)]
+    tested_low_bandwidth = False
+    profile_index = 0
+    while profile_index < len(profiles):
+        width, height, fps = profiles[profile_index]
+        profile_index += 1
+        interference_found = False
+        for backend in backends:
+            # Lista de (indice, cap): as cameras permanecem abertas em paralelo.
+            accepted: list[tuple[int, Any]] = []
+            motion_by_index: dict[int, int] = {}
+            print(f"[descoberta] Teste simultaneo por {backend.upper()}, indices 0..{max_index-1}", flush=True)
             try:
-                cap = open_video_source(index, backend=backend,
-                                        width=int(video.get("width", 640)),
-                                        height=int(video.get("height", 480)),
-                                        fps=int(video.get("fps", 20)),
-                                        fourcc=str(video.get("fourcc", "MJPG")),
-                                        open_timeout_ms=1800,
-                                        read_timeout_ms=1800)
-                if cap is None:
-                    continue
-                valid, reason = validate_capture(cap, samples=samples,
-                                                 accept_static=accept_static)
-                if valid:
-                    print(f"[descoberta]   [OK] fonte {index} ({backend}): {reason}", flush=True)
-                    found.append({"source": index, "backend": backend, "kind": "webcam"})
-                else:
-                    print(f"[descoberta]   [-] fonte {index}: {reason}", flush=True)
-            except (cv2.error, OSError, ValueError) as exc:
-                print(f"[descoberta]   [-] fonte {index}: {exc}", flush=True)
+                for index in range(max_index):
+                    cap = None
+                    try:
+                        cap = open_video_source(index, backend=backend,
+                                                width=width, height=height, fps=fps,
+                                                fourcc=fourcc, open_timeout_ms=1800,
+                                                read_timeout_ms=1800)
+                        if cap is None:
+                            continue
+                        valid, motion, reason = probe_capture(cap, samples=samples,
+                                                             accept_static=accept_static)
+                        if not valid:
+                            print(f"[descoberta]   [-] fonte {index}: {reason}", flush=True)
+                            continue
+                        # Uma segunda camera pode derrubar a primeira ao negociar
+                        # largura de banda USB. Espera estabilizar e confere TODAS.
+                        time.sleep(0.35)
+                        interrupted = []
+                        for old_index, old_cap in accepted:
+                            alive, _motion, status = probe_capture(old_cap, samples=max(8, samples),
+                                                                   sample_delay=.12,
+                                                                   accept_static=accept_static)
+                            if not alive:
+                                interrupted.append((old_index, status))
+                        if interrupted:
+                            summary = "; ".join(f"{i}: {why}" for i, why in interrupted)
+                            interference_found = True
+                            print(f"[descoberta]   [!] fonte {index} interfere nas cameras abertas ({summary}); ignorando", flush=True)
+                            continue
+                        accepted.append((index, cap))
+                        motion_by_index[index] = motion
+                        cap = None  # ownership transferido; nao fechar no finally
+                        print(f"[descoberta]   [OK] fonte {index} simultanea ({backend}): {reason}", flush=True)
+                    except (cv2.error, OSError, ValueError) as exc:
+                        print(f"[descoberta]   [-] fonte {index}: {type(exc).__name__}", flush=True)
+                    finally:
+                        if cap is not None:
+                            cap.release()
+                    time.sleep(.12)
+
+                # Ultima verificacao de todas antes de escrever config.yaml.
+                stable = []
+                score_motion = 0
+                for index, cap in accepted:
+                    ok, motion, message = probe_capture(cap, samples=max(6, samples),
+                                                        sample_delay=.12,
+                                                        accept_static=accept_static)
+                    if ok:
+                        score_motion += motion + motion_by_index.get(index, 0)
+                        stable.append({"source": index, "backend": backend, "kind": "webcam",
+                                       "width": width, "height": height, "fps": fps})
+                    else:
+                        print(f"[descoberta]   [-] fonte {index} parou durante teste conjunto: {message}", flush=True)
+                # Mesmo numero de fontes: prioriza backend com video mais vivo.
+                # Exemplo: Iriun com 1 mudanca no DSHOW e 5 no MSMF.
+                score = (len(stable), score_motion)
+                if score > best_score:
+                    best_score = score
+                    best_found = stable
+                    best_backend = backend
             finally:
-                if cap is not None:
+                for _, cap in accepted:
                     cap.release()
-            # Drivers DirectShow precisam de tempo para liberar completamente a webcam.
-            time.sleep(.12)
-        if len(found) > len(best_found):
-            best_found = found
-            best_backend = backend
+                # Evita reutilizar handle antes de o driver liberar a camera.
+                time.sleep(.4)
+        if (interference_found and not tested_low_bandwidth
+                and options.get("fallback_low_bandwidth", False)
+                and (width, height, fps) != (320, 240, 10)):
+            print("[descoberta] USB instavel em perfil normal; testando 320x240 a 10 FPS", flush=True)
+            profiles.append((320, 240, 10))
+            tested_low_bandwidth = True
+
     if best_backend:
-        print(f"[descoberta] Backend escolhido: {best_backend.upper()} ({len(best_found)} fontes).", flush=True)
+        print(f"[descoberta] Backend selecionado: {best_backend.upper()} ({len(best_found)} fonte(s) simultaneas).", flush=True)
     return best_found
 
 
@@ -284,6 +357,12 @@ def merge_cameras(existing: list[dict[str, Any]], discovered: list[dict[str, Any
             used_ids.add(cam_id)
             row = {"id": cam_id, "name": detected.get("name") or f"Camera {index}"}
         row["source"] = detected["source"]
+        # Perfil de captura VALIDADO com todas as webcams abertas: sem sobrescrever
+        # com configuracao global mais pesada quando a baixa largura de banda funcionou.
+        if key[0] == "webcam":
+            for setting in ("width", "height", "fps"):
+                if setting in detected:
+                    row[setting] = detected[setting]
         row["backend"] = detected.get("backend", row.get("backend", "ffmpeg" if key[0] == "ip" else "default"))
         if detected.get("username_env"):
             row["username_env"] = detected["username_env"]
@@ -291,6 +370,8 @@ def merge_cameras(existing: list[dict[str, Any]], discovered: list[dict[str, Any
             row["password_env"] = detected["password_env"]
         if detected.get("name") and not previous:
             row["name"] = detected["name"]
+        if isinstance(row.get("name"), str) and "sem sinal" in row["name"].lower():
+            row["name"] = re.sub(r"\s*\(?[^()]*sem sinal[^()]*\)?", "", row["name"], flags=re.IGNORECASE).strip() or str(row["id"])
         row["enabled"] = True
         result.append(row)
     for previous in existing:

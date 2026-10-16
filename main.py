@@ -15,14 +15,18 @@ from ultralytics import YOLO
 from api import create_app
 from auth import AuthService
 from camera_stream import LatestFrameCamera
-from config import load_config, resolve_project_path, resolve_tracker
+from config import load_config, resolve_project_path
 from camera_discovery import discover_and_sync
 from counting import GateCounter
+from tracking import MultiObjectTracker, boxes_to_detections
 from evidence import EvidenceRecorder
 from persistence import EventDatabase
 from state import LiveFrameStore, SharedState
 
 BASE_DIR = Path(__file__).resolve().parent
+# Drivers USB Windows podem travar quando duas threads negociam VideoCapture
+# ao mesmo tempo. Uma abertura por vez, sem serializar leitura/inferencia.
+CAMERA_OPEN_LOCK = threading.Lock()
 
 
 def parse_args() -> argparse.Namespace:
@@ -199,6 +203,7 @@ class CameraWorker:
         )
         self.frames = LiveFrameStore()
         gate = camera_cfg["gate"]
+        self.tracker = MultiObjectTracker(max_missing_seconds=3.5)
         self.counter = GateCounter(
             left_x=float(gate["left_x"]),
             right_x=float(gate["right_x"]),
@@ -238,6 +243,7 @@ class CameraWorker:
     def reset(self) -> int:
         with self._runtime_lock:
             self.counter.reset()
+            self.tracker.reset()
             self.track_visual_status.clear()
             self.track_visual_last_seen.clear()
             with self._visual_lock:
@@ -289,7 +295,10 @@ class CameraWorker:
             )
 
     def _visuals_for_render(self) -> list[dict[str, Any]]:
-        max_age = float(self.cfg.get("display", {}).get("max_box_age_ms", 700)) / 1000.0
+        # Preserva boxes entre inferencias: em CPU o processamento pode ser
+        # mais lento que a captura, mas nao deve parecer que o ID desapareceu.
+        interval = 1.0 / max(0.5, float(self.camera_cfg.get("inference_fps", 4.0)))
+        max_age = max(1.5, float(self.cfg.get("display", {}).get("max_box_age_ms", 1800)) / 1000.0, 2.5 * interval)
         with self._visual_lock:
             if time.monotonic() - self._latest_visuals_at > max_age:
                 return []
@@ -370,16 +379,25 @@ class CameraWorker:
         tentativa = 0
         while not self._stop.is_set():
             try:
-                return LatestFrameCamera(
-                    source=self.camera_cfg["source"],
-                    width=int(self.camera_cfg.get("width", 0)) or None,
-                    height=int(self.camera_cfg.get("height", 0)) or None,
-                    fps=int(self.camera_cfg.get("fps", 0)) or None,
-                    backend=str(self.camera_cfg.get("backend", "auto")),
-                    fourcc=str(self.camera_cfg.get("fourcc", "MJPG")),
-                    username_env=self.camera_cfg.get("username_env"),
-                    password_env=self.camera_cfg.get("password_env"),
-                ).start()
+                # Abre sequencialmente, mas cada webcam mantem sua propria
+                # thread de captura e segue rodando enquanto outra e aberta.
+                with CAMERA_OPEN_LOCK:
+                    if self._stop.is_set():
+                        return None
+                    camera = LatestFrameCamera(
+                        source=self.camera_cfg["source"],
+                        width=int(self.camera_cfg.get("width", 0)) or None,
+                        height=int(self.camera_cfg.get("height", 0)) or None,
+                        fps=int(self.camera_cfg.get("fps", 0)) or None,
+                        backend=str(self.camera_cfg.get("backend", "auto")),
+                        fourcc=str(self.camera_cfg.get("fourcc", "MJPG")),
+                        username_env=self.camera_cfg.get("username_env"),
+                        password_env=self.camera_cfg.get("password_env"),
+                    ).start()
+                    # Deixa o driver terminar a negociacao inicial antes de
+                    # permitir a abertura da segunda webcam no mesmo USB.
+                    self._stop.wait(0.4)
+                    return camera
             except RuntimeError as exc:
                 tentativa += 1
                 self.state.update_metrics(
@@ -393,12 +411,12 @@ class CameraWorker:
 
     def _run(self) -> None:
         model_cfg = self.cfg["model"]
-        tracker = resolve_tracker(str(model_cfg["tracker"]))
         target_inference_fps = max(0.5, float(self.camera_cfg.get("inference_fps", 6.0)))
         inference_interval = 1.0 / target_inference_fps
 
         try:
-            # Um modelo por camera preserva o estado do ByteTrack de cada fonte.
+            # Um YOLO por camera para inferencia; associacao multiobjeto leve
+            # separada para nao depender da existencia de boxes.id/ByteTrack.
             # As inferencias sao coordenadas globalmente para nao saturar a CPU.
             model = YOLO(str(model_cfg["path"]))
             self._camera = self._abrir_camera_com_retentativa()
@@ -419,7 +437,7 @@ class CameraWorker:
 
             self.state.update_metrics(
                 sistema_rodando=True,
-                tracker=str(model_cfg["tracker"]),
+                tracker="MultiObjectTracker (YOLO predict)",
                 modelo=str(model_cfg["path"]),
                 ultimo_erro=None,
                 resolucao_camera=f"{self._camera.actual_width}x{self._camera.actual_height}",
@@ -440,6 +458,7 @@ class CameraWorker:
             inference_mark = time.perf_counter()
             inference_fps = 0.0
             next_inference_at = 0.0
+            last_diagnostic_at = time.monotonic()
 
             print(
                 f"[{self.camera_id}] camera aberta em "
@@ -468,17 +487,14 @@ class CameraWorker:
                     # Ao reconectar, nao reutilizar trilhas da imagem anterior.
                     with self._runtime_lock:
                         self.counter.reset()
+                        self.tracker.reset()
                         self.track_visual_status.clear()
                         self.track_visual_last_seen.clear()
                     with self._visual_lock:
                         self._latest_visuals = []
                         self._latest_visuals_at = 0.0
-                    predictor = getattr(model, "predictor", None)
-                    for active_tracker in getattr(predictor, "trackers", []) or []:
-                        try:
-                            active_tracker.reset()
-                        except Exception:
-                            pass
+                    # Os IDs antigos nao podem continuar associados a uma
+                    # nova imagem apos a reconexao do dispositivo.
                     self._camera.stop()
                     self._camera = None
                     self._camera = self._abrir_camera_com_retentativa()
@@ -502,21 +518,19 @@ class CameraWorker:
                 inference_index += 1
 
                 crop, roi_box = roi_crop(frame, self.camera_cfg["roi"])
-                track_kwargs = dict(
+                predict_kwargs = dict(
                     source=crop,
-                    persist=True,
-                    tracker=tracker,
                     classes=list(model_cfg["classes"]),
                     conf=float(model_cfg["confidence"]),
                     imgsz=int(model_cfg["imgsz"]),
                     verbose=False,
                 )
                 if model_cfg.get("device") not in (None, "", "auto"):
-                    track_kwargs["device"] = model_cfg["device"]
+                    predict_kwargs["device"] = model_cfg["device"]
 
                 started = time.perf_counter()
                 results, queue_wait_ms = self.inference_coordinator.run(
-                    lambda: model.track(**track_kwargs)
+                    lambda: model.predict(**predict_kwargs)
                 )
                 latency_ms = (time.perf_counter() - started) * 1000.0
 
@@ -531,51 +545,44 @@ class CameraWorker:
                 current_visuals: list[dict[str, Any]] = []
                 pending_events: list[dict[str, Any]] = []
 
-                if results:
-                    boxes = results[0].boxes
-                    if boxes is not None and boxes.id is not None:
-                        xyxy = boxes.xyxy.cpu().tolist()
-                        ids = boxes.id.int().cpu().tolist()
-                        confs = boxes.conf.cpu().tolist()
-                        detections = len(ids)
-                        off_x, off_y = roi_box[0], roi_box[1]
-                        roi_width = max(1, roi_box[2] - roi_box[0])
+                # boxes.id pode ser None mesmo se o detector encontrou pessoas.
+                # Nao descartar as caixas: associar TODAS via tracker local,
+                # suportando diversas entidades independentes no mesmo frame.
+                raw_detections = boxes_to_detections(results[0].boxes) if results else []
+                tracked = self.tracker.update(raw_detections)
+                detections = len(raw_detections)
+                off_x, off_y = roi_box[0], roi_box[1]
+                roi_width = max(1, roi_box[2] - roi_box[0])
 
-                        for bbox, track_id, confidence in zip(xyxy, ids, confs):
-                            x1, y1, x2, y2 = bbox
-                            event = self.counter.update(
-                                track_id=int(track_id),
-                                bbox=(x1, y1, x2, y2),
-                                frame_width=roi_width,
-                                confidence=float(confidence),
-                                frame_index=inference_index,
+                for item in tracked:
+                    x1, y1, x2, y2 = item.bbox
+                    tid = item.track_id
+                    event = self.counter.update(
+                        track_id=tid,
+                        bbox=item.bbox,
+                        frame_width=roi_width,
+                        confidence=item.confidence,
+                        frame_index=inference_index,
+                    )
+                    with self._runtime_lock:
+                        self.track_visual_last_seen[tid] = inference_index
+                        if event:
+                            self.track_visual_status[tid] = (
+                                "counted" if event["contabilizado"] else "returned"
                             )
+                        visual_status = self.track_visual_status.get(tid, "tracking")
 
-                            tid = int(track_id)
-                            with self._runtime_lock:
-                                self.track_visual_last_seen[tid] = inference_index
-                                if event:
-                                    self.track_visual_status[tid] = (
-                                        "counted" if event["contabilizado"] else "returned"
-                                    )
-                                visual_status = self.track_visual_status.get(tid, "tracking")
-
-                            gx1, gy1 = int(x1 + off_x), int(y1 + off_y)
-                            gx2, gy2 = int(x2 + off_x), int(y2 + off_y)
-                            current_visuals.append(
-                                {
-                                    "track_id": tid,
-                                    "confidence": float(confidence),
-                                    "status": visual_status,
-                                    "bbox": (gx1, gy1, gx2, gy2),
-                                    "anchor": (
-                                        int((x1 + x2) / 2 + off_x),
-                                        int(y2 + off_y),
-                                    ),
-                                }
-                            )
-                            if event:
-                                pending_events.append(event)
+                    gx1, gy1 = int(x1 + off_x), int(y1 + off_y)
+                    gx2, gy2 = int(x2 + off_x), int(y2 + off_y)
+                    current_visuals.append({
+                        "track_id": tid,
+                        "confidence": item.confidence,
+                        "status": visual_status,
+                        "bbox": (gx1, gy1, gx2, gy2),
+                        "anchor": (int((x1 + x2) / 2 + off_x), int(y2 + off_y)),
+                    })
+                    if event:
+                        pending_events.append(event)
 
                 self.counter.cleanup(inference_index)
                 stale_after = int(self.camera_cfg["gate"]["stale_after_frames"])
@@ -618,6 +625,15 @@ class CameraWorker:
                             }
                         )
                         self.state.register_event(event)
+
+                if time.monotonic() - last_diagnostic_at >= 8.0:
+                    print(
+                        f"[{self.camera_id}] deteccoes={detections}, "
+                        f"ids_ativos={len(tracked)}, fps_ia={inference_fps:.1f}, "
+                        f"fps_captura={self._camera.fps:.1f}, "
+                        f"inferencia={latency_ms:.0f}ms, fila={queue_wait_ms:.0f}ms"
+                    )
+                    last_diagnostic_at = time.monotonic()
 
                 self.state.update_metrics(
                     animais_no_frame_agora=detections,

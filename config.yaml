@@ -11,16 +11,16 @@ api:
   # Menor qualidade reduz CPU/rede sem prejudicar o acompanhamento no Rebano.
   jpeg_quality: 72
   # O video da API nao precisa acompanhar os 30 FPS da webcam.
-  stream_fps: 15
+  stream_fps: 12
   # false envia somente o video anotado para o Rebano; economiza CPU e rede.
   include_sidebar: false
 
 # A tela local roda separada da IA. Assim o video continua fluido mesmo quando
 # a inferencia estiver em 4-8 FPS.
 display:
-  preview_fps: 20
+  preview_fps: 15
   # Se a IA demorar demais, nao deixa uma box antiga parada na tela indefinidamente.
-  max_box_age_ms: 700
+  max_box_age_ms: 2200
   sidebar:
     enabled: true
     width: 280
@@ -50,7 +50,9 @@ discovery:
     samples: 8
     # Uma imagem permanentemente identica costuma indicar fonte virtual sem sinal.
     # Se uma camera fisica de cena muito estatica for ignorada, mude para true.
-    accept_static_frames: false
+    accept_static_frames: true
+    # Se duas webcams se bloquearem, tenta um perfil 320x240 / 10 FPS.
+    fallback_low_bandwidth: true
   onvif:
     enabled: true
     timeout_seconds: 2.0
@@ -71,7 +73,7 @@ video:
   # 640x480 + MJPG reduz muito o uso do barramento USB com duas webcams.
   width: 640
   height: 480
-  fps: 20
+  fps: 12
   # "dshow" fixo no Windows: com "auto", uma camera podia abrir por DirectShow e a
   # outra por Media Foundation, que numeram as webcams em ordem diferente, e as duas
   # acabavam lendo a mesma camera fisica.
@@ -79,35 +81,39 @@ video:
   fourcc: "MJPG"
 
   # FPS da IA reduzido em CPU: nao limita o FPS do video transmitido.
-  inference_fps: 2.5
+  inference_fps: 5.0
   inference_stride: 1
 
   # Esta lista sera atualizada AUTOMATICAMENTE no inicio de main.py.
   # IDs e configuracoes anteriores permanecem para preservar o vinculo no Rebano.
   # Fontes sem imagem valida ficam com enabled: false.
   cameras:
+  - id: camera_1
+    name: Webcam 1
+    source: 0
+    enabled: true
+    width: 640
+    height: 480
+    fps: 12
+    backend: msmf
   - id: camera_2
     name: Webcam 2
     source: 1
-    enabled: true
+    enabled: false
     backend: dshow
   - id: camera_3
     name: Camera 3
     source: 2
     backend: dshow
-    enabled: true
-  - id: camera_1
-    name: Webcam 1 (Iriun virtual - sem sinal)
-    source: 0
     enabled: false
 model:
   path: "yolo26n.pt"
   # 0 = person para testes. Para COCO, 19 = cow.
   classes: [0]
-  confidence: 0.35
+  confidence: 0.25
   # 320 e o perfil recomendado para duas webcams em CPU.
   # Se tiver GPU ou precisar detectar objetos pequenos, tente 416.
-  imgsz: 320
+  imgsz: 384
   device: null
   tracker: "tracker_bytetrack.yaml"
 
@@ -121,7 +127,7 @@ roi:
 gate:
   left_x: 0.42
   right_x: 0.58
-  stable_frames: 2
+  stable_frames: 1
   stale_after_frames: 120
   count_direction: "right_to_left"
   anchor: "bottom_center"

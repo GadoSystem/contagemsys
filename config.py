@@ -24,7 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "display": {
         "preview_fps": 20,
-        "max_box_age_ms": 700,
+        "max_box_age_ms": 2200,
         "sidebar": {"enabled": True, "width": 300, "position": "left"},
     },
     "performance": {
@@ -35,7 +35,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "discovery": {
         "enabled": True,
         "webcam": {"enabled": True, "backend": "auto", "max_index": 6,
-                   "samples": 8, "accept_static_frames": False},
+                   "samples": 8, "accept_static_frames": True,
+                   "fallback_low_bandwidth": True},
         "onvif": {"enabled": True, "timeout_seconds": 2.0,
                   "username_env": "ONVIF_USERNAME", "password_env": "ONVIF_PASSWORD"},
         "ip_streams": [],
@@ -46,7 +47,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "fps": 30,
         "backend": "auto",
         "fourcc": "MJPG",
-        "inference_fps": 6.0,
+        "inference_fps": 5.0,
         "inference_stride": 1,
         "cameras": [
             {"id": "camera_1", "name": "Camera 1", "source": 0, "enabled": True},
@@ -55,16 +56,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": {
         "path": "yolo26n.pt",
         "classes": [0],
-        "confidence": 0.35,
-        "imgsz": 320,
+        "confidence": 0.25,
+        "imgsz": 384,
         "device": None,
-        "tracker": "tracker_bytetrack.yaml",
+        "tracker": "tracker_bytetrack.yaml",  # legado; associacao leve usa tracking.py
     },
     "roi": {"enabled": False, "x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0},
     "gate": {
         "left_x": 0.42,
         "right_x": 0.58,
-        "stable_frames": 2,
+        "stable_frames": 1,
         "stale_after_frames": 120,
         "count_direction": "right_to_left",
         "anchor": "bottom_center",
