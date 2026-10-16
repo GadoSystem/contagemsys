@@ -1,0 +1,5 @@
+-r ../requirements.txt
+
+# Janela desktop (WebView2/Edge no Windows) e empacotamento do ContagemSys.exe
+pywebview>=5.3
+pyinstaller>=6.10

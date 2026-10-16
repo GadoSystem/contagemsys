@@ -14,3 +14,8 @@ benchmark_results.csv
 *.onnx
 *_openvino_model/
 *.engine
+# Build do ContagemSys.exe
+build/
+dist/
+venv-build/
+logs/

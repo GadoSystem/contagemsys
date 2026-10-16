@@ -15,7 +15,7 @@ from ultralytics import YOLO
 from api import create_app
 from auth import AuthService
 from camera_stream import LatestFrameCamera
-from config import load_config, resolve_project_path
+from config import BASE_DIR, load_config, resolve_project_path
 from camera_discovery import discover_and_sync
 from counting import GateCounter
 from tracking import MultiObjectTracker, boxes_to_detections
@@ -23,7 +23,6 @@ from evidence import EvidenceRecorder
 from persistence import EventDatabase
 from state import LiveFrameStore, SharedState
 
-BASE_DIR = Path(__file__).resolve().parent
 # Drivers USB Windows podem travar quando duas threads negociam VideoCapture
 # ao mesmo tempo. Uma abertura por vez, sem serializar leitura/inferencia.
 CAMERA_OPEN_LOCK = threading.Lock()
@@ -34,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(BASE_DIR / "config.yaml"))
     parser.add_argument("--no-discovery", action="store_true", help="Usa fontes atuais sem buscar dispositivos")
     parser.add_argument("--discover-only", action="store_true", help="Atualiza config.yaml e encerra antes de iniciar a API")
+    parser.add_argument("--desktop", action="store_true", help="Abre o painel em janela propria (ContagemSys.exe)")
     return parser.parse_args()
 
 
@@ -144,13 +144,24 @@ class InferenceCoordinator:
 
     def __init__(self, max_concurrent: int = 1) -> None:
         self._semaphore = threading.Semaphore(max(1, int(max_concurrent)))
+        # A primeira inferencia de cada thread roda uma por vez: duas em paralelo
+        # disputavam a inicializacao estatica do OpenVINO (Type.to_dtype) e
+        # travavam o processo inteiro (deadlock entre o GIL e a trava do C++).
+        self._warmup_lock = threading.Lock()
+        self._warmed_threads: set[int] = set()
 
     def run(self, callback):
         queued_at = time.perf_counter()
         self._semaphore.acquire()
         wait_ms = (time.perf_counter() - queued_at) * 1000.0
         try:
-            return callback(), wait_ms
+            thread_id = threading.get_ident()
+            if thread_id in self._warmed_threads:
+                return callback(), wait_ms
+            with self._warmup_lock:
+                result = callback()
+            self._warmed_threads.add(thread_id)
+            return result, wait_ms
         finally:
             self._semaphore.release()
 
@@ -683,6 +694,9 @@ def main() -> int:
     if args.discover_only:
         return 0
     cfg = load_config(args.config)
+    if args.desktop:
+        # A janela do painel substitui as janelas locais do OpenCV.
+        cfg["app"]["show_window"] = False
 
     rebano_api_url = os.getenv("REBANO_API_URL", "http://localhost:5148").rstrip("/")
     jwt_secret = os.getenv("CONTAGEM_JWT_SECRET")
@@ -772,6 +786,12 @@ def main() -> int:
     last_display_versions = {worker.camera_id: -1 for worker in workers}
 
     try:
+        if args.desktop:
+            from desktop import open_window
+
+            # Bloqueia ate o usuario fechar a janela; fechar encerra o ContagemSys.
+            open_window(f"http://127.0.0.1:{port}/", str(cfg["app"]["name"]), api_thread.is_alive)
+            return 0
         while True:
             if cfg["app"].get("show_window", True):
                 updated_any = False

@@ -1,5 +1,13 @@
 # Changelog
 
+## V5.3.0 — aplicativo desktop (ContagemSys.exe)
+
+- `main.py --desktop` abre o painel em janela própria (pywebview: WebView2 no Windows) no lugar das janelas do OpenCV; fechar a janela encerra o sistema; sem WebView2, abre no navegador padrão;
+- `ContagemSys.exe` gerado por PyInstaller (`packaging/ContagemSys.spec`, `packaging/build_windows.bat`) e instalador Inno Setup (`packaging/instalador.iss`), também pelo GitHub Actions;
+- no exe, `config.yaml`, `.env`, `data/` e `eventos/` ficam ao lado do executável;
+- grade do painel fluida: ~20 FPS com até 4 câmeras, ~6 FPS até 9, 1 FPS acima disso;
+- corrigido travamento intermitente na inicialização: a primeira inferência de cada câmera agora roda uma por vez (duas em paralelo travavam o processo dentro do OpenVINO).
+
 ## V5.2.0 — nova interface de login e painel
 
 - login e painel redesenhados (tema escuro "centro de monitoramento", identidade do Rebano), sem CDN, fontes externas ou etapa de build;

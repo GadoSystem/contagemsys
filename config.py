@@ -4,10 +4,17 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 import re
+import sys
 
 import yaml
 
-BASE_DIR = Path(__file__).resolve().parent
+# No ContagemSys.exe (PyInstaller) os arquivos editaveis (config.yaml, .env,
+# data/, eventos/) ficam ao lado do executavel, nao na pasta temporaria.
+BASE_DIR = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent
+)
 CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 DEFAULT_CONFIG: dict[str, Any] = {

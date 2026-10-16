@@ -102,6 +102,9 @@ contagemsys/
 ├── counting.py              # Lógica de contagem
 ├── persistence.py           # Eventos e armazenamento SQLite
 ├── web_ui.py                # HTML das páginas de login, painel e admin
+├── desktop.py               # Janela própria do painel (ContagemSys.exe)
+├── contagemsys_app.py       # Ponto de entrada do ContagemSys.exe
+├── packaging/               # Build do .exe (PyInstaller) e instalador (Inno Setup)
 ├── static/                  # CSS, JavaScript e logo do painel (sem CDN)
 ├── config.yaml              # Câmeras, IA, streaming e desempenho
 ├── .env                     # Endereços e segredos (não publicar)
@@ -199,11 +202,21 @@ A porta do frontend é **5173 quando iniciado conforme o LEIA-ME.txt**. O comand
 ### 8.1. Painel do usuário e agrupamento por fazenda
 
 - **Arquivos:** o HTML fica em `web_ui.py`; estilos, scripts e logo ficam em `static/` (`app.css`, `login.js`, `painel.js`, `logo-rebano.svg`), servidos pelo FastAPI em `/static`. Nada é carregado da internet (sem CDN nem fontes externas).
-- **Grade:** cada bloco atualiza a imagem a partir do `frame.jpg` já produzido pelo worker (cerca de 1 quadro/s). O MJPEG completo só é aberto na visão ampliada, uma conexão por vez. Nenhuma captura extra é criada no servidor.
+- **Grade:** cada bloco atualiza a imagem a partir do `frame.jpg` já produzido pelo worker: ~20 quadros/s com até 4 câmeras na tela, ~6 quadros/s com até 9 e 1 quadro/s acima disso. O MJPEG completo só é aberto na visão ampliada, uma conexão por vez. Nenhuma captura extra é criada no servidor.
 - **Tela cheia:** botão no cabeçalho (Fullscreen API). Na visão ampliada, **Esc** volta à grade e **← / →** trocam de câmera.
 - **Fazendas:** uma câmera do ContagemSys aparece na fazenda cujo cadastro de câmera no Rebano tem **Identificação igual ao id da câmera** (`camera_1`, `camera_2`... — sem diferenciar maiúsculas/minúsculas). Câmeras autorizadas sem correspondência vão para **"Outras câmeras"**; fazendas sem câmeras não aparecem. A autorização continua sendo o vínculo do `/admin`: o Rebano só define o agrupamento.
 - **Como cadastrar no Rebano:** no frontend do Rebano, abra a fazenda e cadastre a câmera (ou use `POST /Camera/Criar`) com `identificacao` igual ao id mostrado em `/admin` (ex.: `camera_1`) e `fazendaId` da fazenda desejada. A fazenda precisa estar vinculada ao usuário que fará login.
 - Se o ContagemSys for reiniciado, o token do Rebano em memória se perde: o painel continua funcionando, mostra todas as câmeras em "Outras câmeras" e avisa para sair e entrar novamente.
+
+### 8.2. Aplicativo desktop (ContagemSys.exe)
+
+O ContagemSys é instalado na máquina que tem as câmeras. O `ContagemSys.exe` abre o mesmo painel em **janela própria** (WebView2/Edge, já presente no Windows 10/11), sem navegador. A API continua escutando na rede para a integração com o Rebano. Fechar a janela encerra o ContagemSys. Se a janela própria não puder ser aberta, o painel abre no navegador padrão.
+
+- **Rodar em modo desktop sem empacotar:** `python main.py --desktop` (requer `pip install pywebview`).
+- **Gerar o .exe no Windows:** rode `packaging\build_windows.bat` (Python 3.13 64 bits no PATH). Ele cria o `venv-build`, gera `dist\ContagemSys\ContagemSys.exe` e, se o [Inno Setup 6](https://jrsoftware.org/isdl.php) estiver instalado, o instalador `dist\ContagemSys-Setup.exe`.
+- **Gerar pelo GitHub:** Actions → *Build ContagemSys.exe (Windows)* → *Run workflow*; o instalador fica em *Artifacts*.
+- **Pasta instalada:** `%LOCALAPPDATA%\Programs\ContagemSys` (sem administrador). `config.yaml`, `.env`, `data\` e `eventos\` ficam ao lado do exe e são preservados em atualizações; o log fica em `logs\contagem.log`.
+- O pacote tem cerca de 1 GB por causa do PyTorch/OpenVINO e do modelo YOLO.
 
 ## 9. Testes, limitações e segurança
 

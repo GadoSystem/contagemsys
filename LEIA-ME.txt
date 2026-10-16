@@ -369,4 +369,30 @@ Frontend Rebano (na pasta FrontEnd):
 Esses testes ajudam a verificar o código, mas não substituem testes
 com câmeras reais, várias entidades, conexão USB e transmissão de rede.
 
+14. APLICATIVO DESKTOP (CONTAGEMSYS.EXE)
+---------------------------------------
+O ContagemSys.exe abre o painel em janela própria, sem navegador.
+Fechar a janela encerra o ContagemSys.
+
+14.1. Gerar no Windows (Python 3.13 64 bits no PATH), na pasta do
+      projeto:
+
+        packaging\build_windows.bat
+
+      Resultado: dist\ContagemSys\ContagemSys.exe
+      Com o Inno Setup 6 instalado, também gera o instalador
+      dist\ContagemSys-Setup.exe.
+
+14.2. Ou pelo GitHub: Actions > "Build ContagemSys.exe (Windows)" >
+      Run workflow. Baixe o instalador em "Artifacts".
+
+14.3. O instalador coloca o programa em
+      %LOCALAPPDATA%\Programs\ContagemSys. Edite config.yaml e .env
+      nessa pasta; eles são mantidos ao atualizar. Log em
+      logs\contagem.log.
+
+14.4. Sem empacotar, o mesmo modo roda com:
+
+        python main.py --desktop
+
 FIM DO GUIA

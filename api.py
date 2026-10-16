@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from auth import AuthService, AuthenticationError, IntegrationError, LoginInputError
+from config import BASE_DIR
 from persistence import EventDatabase
 from state import LiveFrameStore
 from web_ui import ADMIN_HTML, LOGIN_HTML, PANEL_HTML
@@ -20,7 +21,7 @@ from web_ui import ADMIN_HTML, LOGIN_HTML, PANEL_HTML
 
 CameraApiContext = dict[str, Any]
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = BASE_DIR / "static"
 OUTRAS_CAMERAS = "Outras câmeras"
 
 
