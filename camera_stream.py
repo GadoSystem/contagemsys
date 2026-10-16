@@ -8,6 +8,11 @@ from typing import Any
 
 import cv2
 
+# V4L2 com 1 buffer faz algumas webcams UVC cairem de 30 para 15 FPS: a camera
+# espera o buffer voltar antes de capturar o proximo quadro. A thread de leitura
+# drena continuamente, entao 2 buffers nao acumulam atraso perceptivel.
+CAPTURE_BUFFERS = 1 if os.name == "nt" else 2
+
 
 def resolve_video_source(source: Any, username_env: str | None = None,
                          password_env: str | None = None) -> Any:
@@ -17,6 +22,12 @@ def resolve_video_source(source: Any, username_env: str | None = None,
     value = os.path.expandvars(source)
     if value.isdigit():
         return int(value)
+    # Linux: /dev/v4l/by-id/... e estavel entre reconexoes USB; vira o indice
+    # V4L2 atual para manter MJPG/resolucao configurados como numa webcam comum.
+    if value.startswith("/dev/"):
+        name = os.path.basename(os.path.realpath(value))
+        if name.startswith("video") and name[5:].isdigit():
+            return int(name[5:])
     if username_env or password_env:
         user = os.getenv(str(username_env), "") if username_env else ""
         password = os.getenv(str(password_env), "") if password_env else ""
@@ -69,7 +80,7 @@ def open_video_source(source: Any, *, backend: str = "auto", width: int | None =
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
         if fps:
             cap.set(cv2.CAP_PROP_FPS, int(fps))
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, CAPTURE_BUFFERS)
     return cap
 
 
@@ -172,7 +183,7 @@ class LatestFrameCamera:
         # MJPG reduz o trafego USB de duas webcams quando o dispositivo suporta.
         # No DirectShow o FOURCC so vale se vier DEPOIS da resolucao: antes, a
         # troca de resolucao volta a camera para YUY2 (sem compressao, ~18 MB/s).
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, CAPTURE_BUFFERS)
 
     def start(self) -> "LatestFrameCamera":
         source = resolve_video_source(self.source, self.username_env, self.password_env)
